@@ -2,17 +2,17 @@
 import os
 import requests
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from pathlib import Path
 from finflux import config
 
 class GroqWhisperAdapter:
     """Groq Whisper API for multilingual transcription."""
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or config.GROQ_API_KEY
         self.url = "https://api.groq.com/openai/v1/audio/transcriptions"
 
-    def transcribe(self, audio_path: str, language: str = None) -> Dict[str, Any]:
+    def transcribe(self, audio_path: str, language: Optional[str] = None) -> Dict[str, Any]:
         """High-resolution transcription via Groq Whisper."""
         if not self.api_key:
             return {"error": "GROQ_API_KEY not set", "text": ""}
@@ -46,14 +46,14 @@ class GroqWhisperAdapter:
 class ExpertSynthesisEngine:
     """World-Class McKinsey-Style Strategic Synthesis for FinFlux V4.2+."""
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or config.GROQ_API_KEY
         self.main_model = config.GROQ_LLM_MODEL
         self.reason_model = config.GROQ_LLM_REASON_MODEL
         self.fast_model = config.GROQ_LLM_FAST_MODEL
         self.url = "https://api.groq.com/openai/v1/chat/completions"
 
-    def _call_groq(self, system_prompt: str, user_prompt: str, model_override: str = None) -> str:
+    def _call_groq(self, system_prompt: str, user_prompt: str, model_override: Optional[str] = None) -> str:
         # Check DEMO_MODE
         if os.environ.get("DEMO_MODE", "").lower() == "true":
             return self._get_demo_response(system_prompt)
@@ -150,12 +150,12 @@ EXAMPLE OUTPUT: "Mera home loan ka EMI bahut zyada ho gaya hai. Soch raha hoon p
             print(f"[GroqExpert] JSON Parse Guard Triggered: {e}")
             return default_analysis
 
-    def analyze(self, transcript: str, entities: List[Dict[str, Any]] = None, fin_sentiment: str = "Neutral") -> Dict[str, Any]:
+    def analyze(self, transcript: str, entities: Optional[List[Dict[str, Any]]] = None, fin_sentiment: str = "Neutral", memory_context: str = "") -> Dict[str, Any]:
         """Stage 7: World-Class Strategic Synthesis & Expert Reasoning (Llama-70B + Qwen-32B)."""
         ent_text = json.dumps(entities or [], indent=2)
         
         # ─── Part 1: Expert Technical Reasoning (Qwen) ───
-        reason_p = f"Transcript: {transcript}\nEntities: {ent_text}\nSentiment: {fin_sentiment}"
+        reason_p = f"Transcript: {transcript}\nEntities: {ent_text}\nSentiment: {fin_sentiment}\nMemoryContext: {memory_context}"
         reason_sys = """You are a Senior Financial Analyst (CFA Level 3, 15 years experience in Indian markets).
 
 Analyze this financial conversation and provide STRUCTURED TECHNICAL REASONING.
@@ -214,7 +214,7 @@ QUALITY STANDARDS:
 - Never use generic filler phrases like "the customer discussed" or "the conversation covered"
 - Use precise financial language
 - If the conversation is in Hindi/Hinglish, the insights should still be in English but reference the Hindi terms used"""
-        final_user = f"TRANSCRIPT: {transcript}\nVERIFIED ENTITIES: {ent_text}\nEXPERT ANALYST NOTES: {expert_reasoning}"
+        final_user = f"TRANSCRIPT: {transcript}\nVERIFIED ENTITIES: {ent_text}\nMEMORY CONTEXT: {memory_context}\nEXPERT ANALYST NOTES: {expert_reasoning}"
         
         raw_response = self._call_groq(final_sys, final_user, model_override=self.main_model)
         analysis_json = self._safe_json_parse(raw_response)

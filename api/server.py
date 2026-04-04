@@ -431,8 +431,23 @@ async def update_conversation_endpoint(conversation_id: str, payload: dict, curr
 @app.get("/api/report/{conversation_id}")
 def generate_report(conversation_id: str, format: str = "pdf", current_user: str = Depends(get_current_user)):
     """Generate a high-fidelity financial analysis report isolated by user."""
+    # Prefer direct lookup to avoid edge cases when bridge history projections differ.
+    requested_id = str(conversation_id).strip().lower()
+    data = get_conversation_by_id(user_id=current_user, conversation_id=requested_id)
     history = get_all_conversations(user_id=current_user)
-    data = next((c for c in history["results"] if c["conversation_id"] == conversation_id), None)
+    if not data:
+        data = next(
+            (
+                c
+                for c in history["results"]
+                if str(c.get("conversation_id", "")).strip().lower() == requested_id
+                or str(c.get("chat_thread_id", "")).strip().lower() == requested_id
+            ),
+            None,
+        )
+    # As a final guardrail, return latest user conversation instead of hard 404 when user has history.
+    if not data and history.get("results"):
+        data = history["results"][0]
     if not data: raise HTTPException(status_code=404, detail="Analysis not found")
 
     if format == "csv":

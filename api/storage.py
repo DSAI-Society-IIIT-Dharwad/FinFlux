@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import bcrypt
+from typing import Any, Dict, Optional
 import requests
 from typing import Any, Dict, List, Optional
 
@@ -42,6 +43,17 @@ def _supabase_headers() -> Dict[str, str]:
         "Content-Type": "application/json",
         "Prefer": "return=representation",
     }
+
+
+def _json_loads_safe(value: Any, fallback: str) -> Any:
+    if isinstance(value, (str, bytes, bytearray)):
+        raw = value
+    else:
+        raw = fallback
+    try:
+        return json.loads(raw)
+    except Exception:
+        return json.loads(fallback)
 
 
 def _supabase_request(method: str, path: str, payload: Optional[Any] = None, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -186,6 +198,7 @@ def _ensure_sqlite_column(table_name: str, column_name: str, column_def: str):
 
 def _run_schema_migrations():
     # Keep backwards compatibility for existing analytics.db created before thread-aware chat.
+    _ensure_sqlite_column("conversations", "user_id", "TEXT")
     _ensure_sqlite_column("conversations", "chat_thread_id", "TEXT")
     _ensure_sqlite_column("conversations", "input_mode", "TEXT")
     _ensure_sqlite_column("conversations", "raw_user_input", "TEXT")
@@ -370,7 +383,7 @@ def save_conversation(data):
     finally:
         db.close()
 
-def search_memories(user_id: str, query_text: str, filters: dict = None, n_results: int = 5):
+def search_memories(user_id: str, query_text: str, filters: Optional[Dict[str, Any]] = None, n_results: int = 5):
     """Supabase vector RPC semantic retrieval with mandatory user_id gating."""
     thread_id = ""
     if filters and isinstance(filters, dict):
@@ -457,9 +470,9 @@ def get_conversation_by_id(user_id: str, conversation_id: str) -> Optional[Dict[
             "expert_reasoning_points": r.expert_reasoning,
             "transcript": r.transcript,
             "confidence_score": r.confidence_score,
-            "entities": json.loads(r.entities or "[]"),
-            "key_points": json.loads(r.key_points or "[]"),
-            "timing": json.loads(r.timing_data or "{}"),
+            "entities": _json_loads_safe(r.entities, "[]"),
+            "key_points": _json_loads_safe(r.key_points, "[]"),
+            "timing": _json_loads_safe(r.timing_data, "{}"),
             "chat_thread_id": r.chat_thread_id or r.id,
             "input_mode": r.input_mode or "text",
             "raw_user_input": r.raw_user_input or r.transcript,
@@ -599,9 +612,9 @@ def get_all_conversations(user_id: str = "guest_001"):
                 "advice_request": r.advice_request,
                 "injection_attempt": r.injection_attempt,
                 "confidence_score": r.confidence_score,
-                "entities": json.loads(r.entities or "[]"),
-                "key_points": json.loads(r.key_points or "[]"),
-                "timing": json.loads(r.timing_data or "{}"),
+                "entities": _json_loads_safe(r.entities, "[]"),
+                "key_points": _json_loads_safe(r.key_points, "[]"),
+                "timing": _json_loads_safe(r.timing_data, "{}"),
                 "chat_thread_id": r.chat_thread_id or r.id,
                 "input_mode": r.input_mode or "text",
                 "raw_user_input": r.raw_user_input or r.transcript,
