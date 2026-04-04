@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { Activity, LayoutDashboard, MonitorPlay } from 'lucide-react';
+import { Activity, LayoutDashboard, MonitorPlay, History } from 'lucide-react';
 import DashboardView from './pages/DashboardView.tsx';
 import RecordView from './pages/RecordView.tsx';
+import HistoryView from './pages/HistoryView.tsx';
 
-type ViewMode = 'dashboard' | 'record';
+type ViewMode = 'dashboard' | 'record' | 'history';
 
 function App() {
   const [currentView, setCurrentView] = useState<ViewMode>('dashboard');
@@ -11,6 +12,7 @@ function App() {
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'record', label: 'Analyze Call', icon: MonitorPlay },
+    { id: 'history', label: 'History', icon: History },
   ];
 
   return (
@@ -72,6 +74,7 @@ function App() {
         <div key={currentView} className="animate-fade-in">
           {currentView === 'dashboard' && <DashboardView onStartCapture={() => setCurrentView('record')} />}
           {currentView === 'record' && <RecordView />}
+          {currentView === 'history' && <HistoryView />}
         </div>
       </main>
     </div>

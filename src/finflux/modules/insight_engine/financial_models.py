@@ -14,7 +14,7 @@ except ImportError:
     HAS_GLINER = False
 
 class ProductionExpertModule:
-    """Consolidated 4-Model High-Performance NLP Stack (V4.2)."""
+    """Consolidated 7-Model High-Performance NLP Stack (V4.2+)."""
 
     _instance = None
 
@@ -46,19 +46,38 @@ class ProductionExpertModule:
         # ── Stage 3: Financial Sentiment & Strategy (FinBERT) ──
         self.fin_pipe = pipeline("sentiment-analysis", model=config.HF_FINBERT, device=self.device)
 
-        # ── Stage 4: Zero-Shot Entity Extraction (GLiNER) ──
+        # ── Stage 4: Zero-Shot Entity Extraction (GLiNER & General NER) ──
         if HAS_GLINER:
             print(f"[ProductionExpertModule] Loading GLiNER Specialist: {config.HF_NER_FINANCIAL}")
             self.gliner = GLiNER.from_pretrained(config.HF_NER_FINANCIAL).to("cuda" if self.device == 0 else "cpu")
         else:
             self.gliner = None
-            self.ner_fallback = pipeline("ner", model=config.HF_NER_GENERAL, aggregation_strategy="simple", device=self.device)
+        
+        self.ner_general = pipeline("ner", model=config.HF_NER_GENERAL, aggregation_strategy="simple", device=self.device)
+
+        # ── Stage 5: Indic Specialist (Indic-BERT) ──
+        print(f"[ProductionExpertModule] Loading Indic Specialist: {config.HF_INDIC_NER}")
+        self.indic_ner = pipeline("ner", model=config.HF_INDIC_NER, device=self.device)
+
+        # ── Stage 6: Local STT Fallback (Whisper Hindi) ──
+        print(f"[ProductionExpertModule] Loading Local STT Fallback: {config.HF_INDIC_STT}")
+        self.stt_pipe = pipeline("automatic-speech-recognition", model=config.HF_INDIC_STT, device=self.device)
 
         # Labels for GLiNER semantic extraction
         self.labels = [
             "INVESTMENT", "LOAN", "EMI", "INSURANCE", "MUTUAL FUND", "GOLD", "STOCK", 
             "PROPERTY", "AMOUNT", "INTEREST RATE", "TENURE", "BANK", "FINANCIAL GOAL"
         ]
+
+    def transcribe_local(self, audio_path: str) -> str:
+        """Local ASR fallback using Whisper-Hindi-Small."""
+        if not hasattr(self, 'stt_pipe'): return ""
+        try:
+            res = self.stt_pipe(audio_path)
+            return res.get("text", "")
+        except Exception as e:
+            print(f"[ProductionExpertModule] Local STT Error: {e}")
+            return ""
 
     def _gliner_safe(self, text: str) -> list:
         """Split text into chunks of max 300 chars to avoid GLiNER memory/token issues."""
@@ -109,17 +128,37 @@ class ProductionExpertModule:
             fin_res = self.fin_pipe(safe_text, truncation=True)[0]
             sentiment_label = fin_res["label"]
 
-            # 4. NER Extraction (GLiNER handled separately via safe chunking)
+            # 4. Entity Extraction (Multi-Pass: GLiNER + General + Indic)
             ner_items = []
             if self.gliner:
                 entities = self._gliner_safe(safe_text)
                 for ent in entities:
                     label = ent["label"].replace(" ", "_").upper()
-                    if label == "MUTUAL_FUND": label = "MUTUAL_FUND"
-                    ner_items.append({"type": label, "value": ent["text"], "context": f"Extracted via GLiNER {config.HF_NER_FINANCIAL}"})
-            else:
-                for item in self.ner_fallback(text):
-                    ner_items.append({"type": item["entity_group"], "value": item["word"], "context": "Fallback NER"})
+                    ner_items.append({"type": label, "value": ent["text"], "context": "GLiNER Specialist"})
+
+            # Add general entities for robustness
+            gen_entities = self.ner_general(safe_text)
+            for ent in gen_entities:
+                if ent['score'] > 0.4:
+                    ner_items.append({"type": ent['entity_group'], "value": ent['word'], "context": "General Pass"})
+
+            # Indic-BERT specialized pass for Hindi (Davlan HRL Specialist)
+            if detected_lang in ["hi", "hindi"]:
+                indic_res = self.indic_ner(safe_text[:512]) # bert-base has 512 token limit
+                for ent in indic_res:
+                    if ent.get('word') and ent.get('entity'):
+                        # Map Davlan tags to clean labels
+                        raw_tag = ent['entity']
+                        label = "INDIC_ENTITY"
+                        if "PER" in raw_tag: label = "PERSON"
+                        elif "ORG" in raw_tag: label = "ORGANIZATION"
+                        elif "LOC" in raw_tag: label = "LOCATION"
+                        
+                        ner_items.append({
+                            "type": label, 
+                            "value": ent['word'].replace("##", ""), 
+                            "context": f"Indic-HRL Pass ({raw_tag})"
+                        })
 
             return {
                 "detected_language": detected_lang,
@@ -127,7 +166,8 @@ class ProductionExpertModule:
                 "confidence_score": confidence_score,
                 "financial_sentiment": sentiment_label,
                 "is_advice_request": advice_res["labels"][0] == "asking for financial advice" and advice_res["scores"][0] > 0.6,
-                "entities": ner_items
+                "entities": ner_items,
+                "stt_engine": "Groq-Whisper (Primary)" # Metadata
             }
         except Exception as e:
             print(f"[ProductionExpertModule] Pipeline error: {e}")
