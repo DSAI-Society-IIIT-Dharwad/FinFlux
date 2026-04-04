@@ -9,11 +9,14 @@ logger = logging.getLogger(__name__)
 class GroqClient:
     """Client for Groq LLM API."""
     def __init__(self, model: str = "llama3-8b-8192", api_key: str | None = None):
-        resolved_api_key = api_key or os.environ.get("GROQ_API_KEY", "")
+        api_key = api_key or os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY is not set. Provide api_key or set GROQ_API_KEY in environment.")
+
         self.model = model
         self.api_url = "https://api.groq.com/openai/v1/chat/completions"
         self.headers = {
-            "Authorization": f"Bearer {resolved_api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
         
