@@ -1,9 +1,10 @@
-drop function if exists public.search_user_message_embeddings(vector, integer, uuid);
+drop function if exists public.search_user_message_embeddings(vector, integer, uuid, double precision);
 
 create or replace function public.search_user_message_embeddings(
   query_embedding vector(384),
   match_count int default 8,
-  filter_thread_id uuid default null
+  filter_thread_id uuid default null,
+  min_similarity double precision default 0.72
 )
 returns table (
   message_id uuid,
@@ -38,8 +39,9 @@ as $$
     e.user_id = auth.uid()
     and m.user_id = auth.uid()
     and (filter_thread_id is null or m.thread_id = filter_thread_id)
+    and (1 - (e.embedding <=> query_embedding)) >= min_similarity
   order by e.embedding <=> query_embedding
   limit greatest(match_count, 1);
 $$;
 
-grant execute on function public.search_user_message_embeddings(vector(384), int, uuid) to authenticated;
+grant execute on function public.search_user_message_embeddings(vector(384), int, uuid, double precision) to authenticated;

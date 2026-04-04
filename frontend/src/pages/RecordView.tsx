@@ -1,6 +1,16 @@
 import { useState, useRef, useCallback } from 'react';
 import { Mic, Square, Loader2, Tag, ShieldAlert, Sparkles, TrendingUp, ShieldCheck, Download, Edit2, Save, FileText, CheckCircle } from 'lucide-react';
 
+type SpeechRecognitionCtor = new () => {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: any) => void) | null;
+  onerror: ((event: any) => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+
 interface Entity { type: string; value: string; context: string; confidence?: number }
 interface TopicScore { topic: string; score: number }
 interface SentimentBreakdown { positive?: number; neutral?: number; negative?: number }
@@ -53,6 +63,8 @@ export default function RecordView() {
   const [recordingTime, setRecordingTime] = useState(0);
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [financialDetected, setFinancialDetected] = useState(false);
+  const [matchedKeywords, setMatchedKeywords] = useState<string[]>([]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -77,6 +89,9 @@ export default function RecordView() {
   const scriptNodeRef = useRef<ScriptProcessorNode | null>(null);
   const pcmBufferRef = useRef<Float32Array[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
+  const recognitionRef = useRef<any>(null);
+  const chunkDetectTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const chunkBufferRef = useRef<string>('');
 
   const drawWaveform = useCallback(() => {
     const c = canvasRef.current, a = analyserRef.current;
@@ -112,12 +127,64 @@ export default function RecordView() {
       setMode('recording'); setRecordingTime(0);
       timerRef.current = setInterval(() => setRecordingTime(t=>t+1), 1000);
       drawWaveform();
+
+      setFinancialDetected(false);
+      setMatchedKeywords([]);
+      chunkBufferRef.current = '';
+
+      const SR = ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition) as SpeechRecognitionCtor | undefined;
+      if (SR) {
+        const rec = new SR();
+        rec.continuous = true;
+        rec.interimResults = true;
+        rec.lang = 'en-IN';
+        rec.onresult = (event: any) => {
+          let chunk = '';
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            chunk += event.results[i][0].transcript || '';
+          }
+          if (chunk.trim()) {
+            chunkBufferRef.current = `${chunkBufferRef.current} ${chunk}`.trim();
+          }
+        };
+        rec.onerror = () => {
+          // Continue recording even if speech recognition fails.
+        };
+        recognitionRef.current = rec;
+        try { rec.start(); } catch {}
+      }
+
+      chunkDetectTimerRef.current = setInterval(async () => {
+        const textChunk = chunkBufferRef.current.trim();
+        chunkBufferRef.current = '';
+        if (!textChunk) return;
+        try {
+          const res = await fetch('http://localhost:8000/api/realtime/financial-detect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: textChunk }),
+          });
+          if (!res.ok) return;
+          const data = await res.json();
+          const detected = Boolean(data?.financial_detected);
+          const words = Array.isArray(data?.matched_keywords) ? data.matched_keywords : [];
+          setFinancialDetected(detected);
+          setMatchedKeywords(words.slice(0, 6));
+        } catch {
+          // Ignore transient errors for realtime indicator path.
+        }
+      }, 5000);
     } catch { setErrorMsg('Mic Error'); }
   };
 
   const stopRecord = async () => {
     cancelAnimationFrame(animFrameRef.current);
     if(timerRef.current) clearInterval(timerRef.current);
+    if(chunkDetectTimerRef.current) clearInterval(chunkDetectTimerRef.current);
+    if(recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch {}
+      recognitionRef.current = null;
+    }
     streamRef.current?.getTracks().forEach(t=>t.stop());
     scriptNodeRef.current?.disconnect();
     
@@ -172,6 +239,19 @@ export default function RecordView() {
       {mode !== 'done' && (
         <div style={{ padding: '100px 60px', borderRadius: '40px', background: 'rgba(255,255,255,0.015)', border: '1px solid rgba(255,255,255,0.05)', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
           {mode === 'recording' && <canvas ref={canvasRef} width={800} height={120} style={{ position: 'absolute', bottom: 0, left: 0, width: '100%', opacity: 0.2 }} />}
+
+          {mode === 'recording' && (
+            <div style={{ position: 'absolute', top: '16px', right: '16px', display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <div style={{ padding: '8px 12px', borderRadius: '999px', border: `1px solid ${financialDetected ? 'rgba(16,185,129,0.45)' : 'rgba(148,163,184,0.35)'}`, background: financialDetected ? 'rgba(16,185,129,0.15)' : 'rgba(148,163,184,0.1)', color: financialDetected ? '#10b981' : '#94a3b8', fontSize: '0.72rem', fontWeight: 800, letterSpacing: '0.04em' }}>
+                {financialDetected ? 'FINANCIAL DETECTED' : 'LISTENING'}
+              </div>
+              {matchedKeywords.length > 0 && (
+                <div style={{ padding: '8px 12px', borderRadius: '999px', border: '1px solid rgba(59,130,246,0.35)', background: 'rgba(59,130,246,0.15)', color: '#93c5fd', fontSize: '0.72rem', fontWeight: 700, maxWidth: '340px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {matchedKeywords.join(', ')}
+                </div>
+              )}
+            </div>
+          )}
           
           <button onClick={mode === 'idle' ? startRecord : stopRecord} 
             style={{ width: '140px', height: '140px', borderRadius: '50%', border: 'none', background: mode === 'recording' ? '#ef4444' : '#3b82f6', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto', transition: 'all 0.4s cubic-bezier(0.4, 0, 0.2, 1)', transform: mode === 'recording' ? 'scale(1.15)' : 'scale(1)', boxShadow: mode === 'recording' ? '0 0 80px rgba(239,68,68,0.5)' : '0 0 80px rgba(59,130,246,0.2)' }}>

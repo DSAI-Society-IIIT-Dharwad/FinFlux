@@ -4,6 +4,7 @@ from sqlalchemy.orm import sessionmaker
 import datetime
 import json
 import os
+import threading
 from pathlib import Path
 import bcrypt
 import requests
@@ -25,6 +26,7 @@ SUPABASE_VECTOR_RPC = os.environ.get("SUPABASE_VECTOR_RPC", "search_user_embeddi
 SUPABASE_CONV_THREADS_TABLE = os.environ.get("SUPABASE_CONV_THREADS_TABLE", "ai_conversation_threads")
 SUPABASE_CONV_MESSAGES_TABLE = os.environ.get("SUPABASE_CONV_MESSAGES_TABLE", "ai_conversation_messages")
 SUPABASE_EMBEDDINGS_TABLE = os.environ.get("SUPABASE_EMBEDDINGS_TABLE", "ai_message_embeddings")
+SUPABASE_QUALITY_METRICS_TABLE = os.environ.get("SUPABASE_QUALITY_METRICS_TABLE", "ai_conversation_quality_metrics")
 
 
 def _supabase_vector_enabled() -> bool:
@@ -35,12 +37,16 @@ def _supabase_conversation_enabled() -> bool:
     return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY and SUPABASE_CONV_THREADS_TABLE and SUPABASE_CONV_MESSAGES_TABLE)
 
 
+def _supabase_quality_enabled() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY and SUPABASE_QUALITY_METRICS_TABLE)
+
+
 def _supabase_headers() -> Dict[str, str]:
     return {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
         "Content-Type": "application/json",
-        "Prefer": "return=representation",
+        "Prefer": "return=representation,resolution=merge-duplicates",
     }
 
 
@@ -59,12 +65,29 @@ def _supabase_request(method: str, path: str, payload: Optional[Any] = None, par
         return None
 
 
-def _supabase_vector_search(user_id: str, query_text: str, n_results: int = 5, thread_id: str = "") -> List[Dict[str, Any]]:
+def _supabase_vector_search(
+    user_id: str,
+    query_text: str,
+    n_results: int = 8,
+    thread_id: str = "",
+    financial_topic: str = "",
+    risk_level: str = "",
+    min_similarity: float = 0.72,
+) -> List[Dict[str, Any]]:
     if not _supabase_vector_enabled():
         return []
 
     query_vector = embed_model.encode(query_text).tolist()
     payload: Dict[str, Any] = {
+        "query_embedding": query_vector,
+        "p_user_id": str(user_id),
+        "match_count": max(1, int(n_results)),
+        "filter_thread_id": thread_id or None,
+        "filter_financial_topic": financial_topic or None,
+        "filter_risk_level": risk_level or None,
+        "min_similarity": float(min_similarity),
+    }
+    payload_legacy: Dict[str, Any] = {
         "query_embedding": query_vector,
         "p_user_id": str(user_id),
         "match_count": max(1, int(n_results)),
@@ -86,29 +109,42 @@ def _supabase_vector_search(user_id: str, query_text: str, n_results: int = 5, t
     last_error: Optional[Exception] = None
     for rpc_name in rpc_candidates:
         url = f"{SUPABASE_URL}/rest/v1/rpc/{rpc_name}"
-        try:
-            res = requests.post(url, headers=headers, json=payload, timeout=20)
-            res.raise_for_status()
-            parsed = res.json() if res.text else []
-            rows = parsed if isinstance(parsed, list) else []
+        for call_payload in (payload, payload_legacy):
+            try:
+                res = requests.post(url, headers=headers, json=call_payload, timeout=20)
+                res.raise_for_status()
+                parsed = res.json() if res.text else []
+                rows = parsed if isinstance(parsed, list) else []
+                break
+            except Exception as exc:
+                last_error = exc
+                continue
+        if rows:
             break
-        except Exception as exc:
-            last_error = exc
-            continue
 
     if not rows and last_error:
         raise last_error
 
     mapped: List[Dict[str, Any]] = []
     for row in rows:
+        similarity = float(row.get("similarity", 0.0)) if isinstance(row, dict) else 0.0
+        if similarity < min_similarity:
+            continue
         payload_obj = row.get("payload", {}) if isinstance(row, dict) else {}
         mapped.append({
             "conversation_id": row.get("message_id"),
+            "thread_id": row.get("thread_id"),
             "timestamp": row.get("created_at"),
-            "topic": payload_obj.get("financial_topic", "N/A"),
+            "financial_topic": payload_obj.get("financial_topic", "N/A"),
             "risk": payload_obj.get("risk_level", "LOW"),
+            "risk_level": payload_obj.get("risk_level", "LOW"),
+            "financial_sentiment": payload_obj.get("financial_sentiment", "Neutral"),
+            "strategic_intent": payload_obj.get("strategic_intent", ""),
+            "future_gearing": payload_obj.get("future_gearing", ""),
+            "risk_assessment": payload_obj.get("risk_assessment", ""),
             "executive_summary": payload_obj.get("executive_summary", ""),
-            "similarity_score": round(float(row.get("similarity", 0.0)), 4),
+            "transcript": payload_obj.get("transcript", ""),
+            "similarity_score": round(similarity, 4),
             "entities": [],
         })
     return mapped
@@ -148,6 +184,8 @@ class ConversationLog(Base):
     chat_thread_id = Column(String, index=True)
     input_mode = Column(String) # text|audio
     raw_user_input = Column(Text)
+    future_insights = Column(Text) # JSON List
+    reminders = Column(Text) # JSON List
 
 class FinancialReminder(Base):
     """Bonus: Personalised financial reminders from conversation history."""
@@ -189,6 +227,8 @@ def _run_schema_migrations():
     _ensure_sqlite_column("conversations", "chat_thread_id", "TEXT")
     _ensure_sqlite_column("conversations", "input_mode", "TEXT")
     _ensure_sqlite_column("conversations", "raw_user_input", "TEXT")
+    _ensure_sqlite_column("conversations", "future_insights", "TEXT")
+    _ensure_sqlite_column("conversations", "reminders", "TEXT")
 
 
 _run_schema_migrations()
@@ -234,10 +274,14 @@ def authenticate_user(username: str, password: str):
         db.close()
 
 def _supabase_insert_conversation(data: Dict[str, Any]) -> None:
-    user_id = str(data.get("user_id", "default_guest"))
+    raw_user_id = data.get("user_id")
+    user_id = str(raw_user_id).strip() if raw_user_id is not None else ""
+    if not user_id:
+        raise ValueError("Missing required user_id for Supabase conversation/embedding insert")
     thread_id = str(data.get("chat_thread_id") or data.get("conversation_id"))
     conversation_id = str(data.get("conversation_id", ""))
     ts = str(data.get("timestamp") or datetime.datetime.utcnow().isoformat())
+    normalized_topic = str(data.get("financial_topic") or data.get("topic") or "N/A")
 
     # Upsert thread with explicit user filter guard fields.
     _supabase_request(
@@ -246,7 +290,7 @@ def _supabase_insert_conversation(data: Dict[str, Any]) -> None:
         payload={
             "id": thread_id,
             "user_id": user_id,
-            "title": str(data.get("financial_topic", "Financial Discussion"))[:180],
+            "title": normalized_topic[:180] if normalized_topic and normalized_topic != "N/A" else "Financial Discussion",
             "last_message_at": ts,
         },
         params={"on_conflict": "id", "columns": "id,user_id,title,last_message_at"},
@@ -290,10 +334,14 @@ def _supabase_insert_conversation(data: Dict[str, Any]) -> None:
         "future_gearing": data.get("future_gearing", ""),
         "risk_level": data.get("risk_level", "LOW"),
         "risk_assessment": data.get("risk_assessment", ""),
-        "financial_topic": data.get("financial_topic", "N/A"),
+        "financial_topic": normalized_topic,
         "financial_sentiment": data.get("financial_sentiment", "Neutral"),
         "confidence_score": data.get("confidence_score", 0.0),
-        "model_attribution": data.get("model_attribution", {}),
+        "model_attribution": {
+            **(data.get("model_attribution", {}) if isinstance(data.get("model_attribution", {}), dict) else {}),
+            "future_insights": data.get("future_insights", []),
+            "reminders": data.get("reminders", []),
+        },
         "expert_reasoning_points": data.get("expert_reasoning", ""),
         "entities": data.get("entities", []),
         "timing": data.get("timing", {}),
@@ -308,25 +356,64 @@ def _supabase_insert_conversation(data: Dict[str, Any]) -> None:
     if isinstance(assistant_rows, list) and assistant_rows:
         assistant_message_id = str(assistant_rows[0].get("id") or "")
 
-    # Write embedding row for semantic retrieval. Skip hard-fail if embedding write fails.
+    # Compute and store embedding asynchronously so response latency is not impacted.
     if assistant_message_id:
+        threading.Thread(
+            target=_insert_embedding_async,
+            args=(assistant_message_id, user_id, data, normalized_topic),
+            daemon=True,
+        ).start()
+
+
+def _build_embedding_source(data: Dict[str, Any], normalized_topic: str) -> str:
+    entities_raw = data.get("entities", []) or []
+    entities_sorted: List[Dict[str, Any]] = []
+    for ent in entities_raw:
+        if isinstance(ent, dict):
+            entities_sorted.append(ent)
+
+    def _confidence_value(ent: Dict[str, Any]) -> float:
+        raw = ent.get("confidence", 0.0)
         try:
-            embedding_vec = embed_model.encode(
-                f"{data.get('executive_summary', '')}\n{data.get('transcript', '')}"
-            ).tolist()
-            _supabase_request(
-                "POST",
-                f"/rest/v1/{SUPABASE_EMBEDDINGS_TABLE}",
-                payload={
-                    "message_id": assistant_message_id,
-                    "user_id": user_id,
-                    "embedding": embedding_vec,
-                    "embedding_model": "all-MiniLM-L6-v2",
-                },
-                params={"on_conflict": "message_id"},
-            )
-        except Exception as exc:
-            print(f"[Storage] Supabase embedding insert skipped: {exc}")
+            return float(raw)
+        except Exception:
+            return 0.0
+
+    entities_sorted.sort(key=_confidence_value, reverse=True)
+    top_entities: List[str] = []
+    for ent in entities_sorted:
+        raw_val = ent.get("value") or ent.get("text") or ent.get("entity") or ""
+        val = str(raw_val).strip()
+        if val:
+            top_entities.append(val)
+        if len(top_entities) >= 3:
+            break
+
+    return " ".join([
+        str(data.get("executive_summary", "")).strip(),
+        str(data.get("strategic_intent", "")).strip(),
+        normalized_topic.strip(),
+        " ".join(top_entities),
+    ]).strip()
+
+
+def _insert_embedding_async(assistant_message_id: str, user_id: str, data: Dict[str, Any], normalized_topic: str) -> None:
+    try:
+        embedding_source = _build_embedding_source(data, normalized_topic)
+        embedding_vec = embed_model.encode(embedding_source).tolist()
+        _supabase_request(
+            "POST",
+            f"/rest/v1/{SUPABASE_EMBEDDINGS_TABLE}",
+            payload={
+                "message_id": assistant_message_id,
+                "user_id": user_id,
+                "embedding": embedding_vec,
+                "embedding_model": "all-MiniLM-L6-v2",
+            },
+            params={"on_conflict": "message_id"},
+        )
+    except Exception as exc:
+        print(f"[Storage] Supabase embedding insert skipped: {exc}")
 
 
 def save_conversation(data):
@@ -346,7 +433,7 @@ def save_conversation(data):
             user_id=user_id,
             timestamp=data["timestamp"],
             language=data.get("language", "unknown"),
-            financial_topic=data["financial_topic"],
+            financial_topic=str(data.get("financial_topic") or data.get("topic") or "N/A"),
             risk_level=data["risk_level"],
             financial_sentiment=data.get("financial_sentiment", "Neutral"),
             executive_summary=data.get("executive_summary", ""),
@@ -364,29 +451,55 @@ def save_conversation(data):
             chat_thread_id=data.get("chat_thread_id", data.get("conversation_id")),
             input_mode=data.get("input_mode", "text"),
             raw_user_input=data.get("raw_user_input", data.get("transcript", "")),
+            future_insights=json.dumps(data.get("future_insights", [])),
+            reminders=json.dumps(data.get("reminders", [])),
         )
         db.add(log)
         db.commit()
     finally:
         db.close()
 
-def search_memories(user_id: str, query_text: str, filters: dict = None, n_results: int = 5):
+def search_memories(
+    user_id: str,
+    query_text: str,
+    filters: Optional[Dict[str, Any]] = None,
+    n_results: int = 8,
+    min_similarity: float = 0.72,
+):
     """Supabase vector RPC semantic retrieval with mandatory user_id gating."""
     thread_id = ""
+    financial_topic = ""
+    risk_level = ""
     if filters and isinstance(filters, dict):
         thread_id = str(filters.get("thread_id", ""))
+        financial_topic = str(filters.get("financial_topic", ""))
+        risk_level = str(filters.get("risk_level", "")).upper()
 
     try:
         if not _supabase_vector_enabled():
             return {"results": [], "error": "Supabase vector search not configured"}
 
-        supa_results = _supabase_vector_search(user_id=user_id, query_text=query_text, n_results=n_results, thread_id=thread_id)
+        supa_results = _supabase_vector_search(
+            user_id=user_id,
+            query_text=query_text,
+            n_results=n_results,
+            thread_id=thread_id,
+            financial_topic=financial_topic,
+            risk_level=risk_level,
+            min_similarity=min_similarity,
+        )
         return {"results": supa_results, "source": "supabase"}
     except Exception as e:
         print(f"[Storage] Supabase semantic search error: {e}")
         return {"results": [], "error": str(e)}
 
 def _map_bridge_message_to_conversation(row: Dict[str, Any]) -> Dict[str, Any]:
+    model_attribution = row.get("model_attribution") or {}
+    if isinstance(model_attribution, str):
+        try:
+            model_attribution = json.loads(model_attribution)
+        except Exception:
+            model_attribution = {}
     return {
         "conversation_id": row.get("conversation_id") or row.get("id"),
         "user_id": row.get("user_id", ""),
@@ -410,6 +523,11 @@ def _map_bridge_message_to_conversation(row: Dict[str, Any]) -> Dict[str, Any]:
         "chat_thread_id": row.get("thread_id") or row.get("conversation_id") or row.get("id"),
         "input_mode": row.get("input_mode") or "text",
         "raw_user_input": row.get("raw_user_input") or row.get("transcript") or "",
+        "model_attribution": model_attribution,
+        "response_mode": model_attribution.get("response_mode", "analysis"),
+        "future_insights": model_attribution.get("future_insights", []),
+        "reminders": model_attribution.get("reminders", []),
+        "quality_metrics": model_attribution.get("quality_metrics", {}),
     }
 
 
@@ -457,12 +575,17 @@ def get_conversation_by_id(user_id: str, conversation_id: str) -> Optional[Dict[
             "expert_reasoning_points": r.expert_reasoning,
             "transcript": r.transcript,
             "confidence_score": r.confidence_score,
-            "entities": json.loads(r.entities or "[]"),
-            "key_points": json.loads(r.key_points or "[]"),
-            "timing": json.loads(r.timing_data or "{}"),
+            "entities": json.loads(str(r.entities or "[]")),
+            "key_points": json.loads(str(r.key_points or "[]")),
+            "timing": json.loads(str(r.timing_data or "{}")),
             "chat_thread_id": r.chat_thread_id or r.id,
             "input_mode": r.input_mode or "text",
             "raw_user_input": r.raw_user_input or r.transcript,
+            "model_attribution": {},
+            "response_mode": "analysis",
+            "future_insights": json.loads(str(r.future_insights or "[]")),
+            "reminders": json.loads(str(r.reminders or "[]")),
+            "quality_metrics": {},
         }
     finally:
         db.close()
@@ -505,12 +628,14 @@ def update_conversation(user_id: str, conversation_id: str, updates: Dict[str, A
             "expert_reasoning_points": "expert_reasoning",
             "entities": "entities",
             "timing": "timing_data",
+            "future_insights": "future_insights",
+            "reminders": "reminders",
         }
         for k, v in updates.items():
             if k not in field_map:
                 continue
             attr = field_map[k]
-            if k in {"entities", "timing"}:
+            if k in {"entities", "timing", "future_insights", "reminders"}:
                 setattr(log, attr, json.dumps(v))
             else:
                 setattr(log, attr, v)
@@ -599,13 +724,155 @@ def get_all_conversations(user_id: str = "guest_001"):
                 "advice_request": r.advice_request,
                 "injection_attempt": r.injection_attempt,
                 "confidence_score": r.confidence_score,
-                "entities": json.loads(r.entities or "[]"),
-                "key_points": json.loads(r.key_points or "[]"),
-                "timing": json.loads(r.timing_data or "{}"),
+                "entities": json.loads(str(r.entities or "[]")),
+                "key_points": json.loads(str(r.key_points or "[]")),
+                "timing": json.loads(str(r.timing_data or "{}")),
                 "chat_thread_id": r.chat_thread_id or r.id,
                 "input_mode": r.input_mode or "text",
                 "raw_user_input": r.raw_user_input or r.transcript,
+                "model_attribution": {},
+                "response_mode": "analysis",
+                "future_insights": json.loads(str(r.future_insights or "[]")),
+                "reminders": json.loads(str(r.reminders or "[]")),
+                "quality_metrics": {},
             })
         return {"count": len(res), "results": res}
     finally:
         db.close()
+
+
+def save_quality_metrics(user_id: str, conversation_id: str, metrics: Dict[str, Any]) -> None:
+    """Persist analysis quality metrics to Supabase table. Non-blocking callers should wrap this in try/except."""
+    if not _supabase_quality_enabled():
+        return
+
+    payload = {
+        "conversation_id": str(conversation_id),
+        "user_id": str(user_id),
+        "asr_confidence": float(metrics.get("asr_confidence", 0.85)),
+        "ner_coverage_pct": float(metrics.get("ner_coverage_pct", 0.0)),
+        "rouge1_recall": float(metrics.get("rouge1_recall", 0.0)),
+        "entity_alignment_pct": float(metrics.get("entity_alignment_pct", 0.0)),
+        "language_confidence": float(metrics.get("language_confidence", 0.0)),
+        "financial_relevance_score": float(metrics.get("financial_relevance_score", 0.0)),
+        "overall_quality_score": float(metrics.get("overall_quality_score", 0.0)),
+        "quality_tier": str(metrics.get("quality_tier", "LOW")),
+        "model_versions": metrics.get("model_versions", {}),
+    }
+    _supabase_request("POST", f"/rest/v1/{SUPABASE_QUALITY_METRICS_TABLE}", payload=payload)
+
+
+def get_quality_summary(user_id: str) -> Dict[str, Any]:
+    """Aggregate quality metrics for dashboard consumption."""
+    if not _supabase_quality_enabled():
+        return {
+            "average_overall_quality_score": 0.0,
+            "quality_tier_distribution": {"EXCELLENT": 0, "GOOD": 0, "ACCEPTABLE": 0, "LOW": 0},
+            "average_asr_confidence_by_language": {"hi": 0.0, "en": 0.0, "hinglish": 0.0},
+            "quality_trend_last_10": [],
+            "count": 0,
+        }
+
+    rows = _supabase_request(
+        "GET",
+        f"/rest/v1/{SUPABASE_QUALITY_METRICS_TABLE}",
+        params={
+            "select": "conversation_id,asr_confidence,overall_quality_score,quality_tier,created_at",
+            "user_id": f"eq.{user_id}",
+            "order": "created_at.desc",
+        },
+    ) or []
+
+    tier_dist = {"EXCELLENT": 0, "GOOD": 0, "ACCEPTABLE": 0, "LOW": 0}
+    total_overall = 0.0
+    count = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            total_overall += float(row.get("overall_quality_score", 0.0) or 0.0)
+        except Exception:
+            pass
+        tier = str(row.get("quality_tier", "LOW")).upper()
+        if tier in tier_dist:
+            tier_dist[tier] += 1
+        count += 1
+
+    avg_overall = (total_overall / count) if count > 0 else 0.0
+
+    msg_rows = _supabase_request(
+        "GET",
+        f"/rest/v1/{SUPABASE_CONV_MESSAGES_TABLE}",
+        params={
+            "select": "conversation_id,model_attribution,created_at",
+            "user_id": f"eq.{user_id}",
+            "role": "eq.assistant",
+            "order": "created_at.desc",
+        },
+    ) or []
+
+    convo_language: Dict[str, str] = {}
+    for row in msg_rows:
+        if not isinstance(row, dict):
+            continue
+        cid = str(row.get("conversation_id", "")).strip()
+        if not cid or cid in convo_language:
+            continue
+        model_attr = row.get("model_attribution") or {}
+        if isinstance(model_attr, str):
+            try:
+                model_attr = json.loads(model_attr)
+            except Exception:
+                model_attr = {}
+        detected = ""
+        if isinstance(model_attr, dict):
+            xr = model_attr.get("xlm_roberta", {})
+            if isinstance(xr, dict):
+                detected = str(xr.get("detected_language", "")).strip().lower()
+        convo_language[cid] = detected
+
+    lang_sums = {"hi": 0.0, "en": 0.0, "hinglish": 0.0}
+    lang_counts = {"hi": 0, "en": 0, "hinglish": 0}
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cid = str(row.get("conversation_id", "")).strip()
+        lang = convo_language.get(cid, "")
+        bucket = "hinglish"
+        if lang.startswith("hi") or "hindi" in lang:
+            bucket = "hi"
+        elif lang.startswith("en") or "english" in lang:
+            bucket = "en"
+        try:
+            conf = float(row.get("asr_confidence", 0.85) or 0.85)
+        except Exception:
+            conf = 0.85
+        lang_sums[bucket] += conf
+        lang_counts[bucket] += 1
+
+    avg_by_lang = {
+        k: (lang_sums[k] / lang_counts[k]) if lang_counts[k] > 0 else 0.0
+        for k in lang_sums.keys()
+    }
+
+    trend_rows = []
+    for row in rows[:10]:
+        if not isinstance(row, dict):
+            continue
+        trend_rows.append(
+            {
+                "conversation_id": row.get("conversation_id", ""),
+                "overall_quality_score": float(row.get("overall_quality_score", 0.0) or 0.0),
+                "quality_tier": str(row.get("quality_tier", "LOW")),
+                "created_at": row.get("created_at", ""),
+            }
+        )
+
+    return {
+        "average_overall_quality_score": round(avg_overall, 4),
+        "quality_tier_distribution": tier_dist,
+        "average_asr_confidence_by_language": {k: round(v, 4) for k, v in avg_by_lang.items()},
+        "quality_trend_last_10": trend_rows,
+        "count": count,
+    }

@@ -9,6 +9,7 @@ interface Entity { type: string; value: string; confidence?: number }
 interface AnalysisResult {
   conversation_id: string;
   chat_thread_id?: string;
+  response_mode?: 'analysis' | 'financial_inquiry' | 'general_conversation';
   timestamp: string;
   financial_topic: string;
   risk_level: string;
@@ -16,6 +17,7 @@ interface AnalysisResult {
   confidence_score: number;
   executive_summary: string;
   transcript: string;
+  assistant_text?: string;
   strategic_intent?: string;
   future_gearing?: string;
   risk_assessment?: string;
@@ -347,15 +349,21 @@ function App() {
       }
       const data: AnalysisResult = await res.json();
       const assistantId = `a-${Date.now()}`;
+      const assistantText = (data.response_mode && data.response_mode !== 'analysis')
+        ? (data.assistant_text || data.executive_summary || 'Done.')
+        : (data.executive_summary || 'Analysis complete.');
       const assistantMessage: ChatMessage = {
         id: assistantId,
         role: 'assistant',
         text: '',
       };
-      setMessages((prev) => [...prev, assistantMessage]);
-      const textOut = data.executive_summary || 'Analysis complete.';
-      await streamAssistantMessage(assistantId, textOut, data);
-      if (voiceReplyOn) speak(textOut);
+      if (data.response_mode === 'analysis') {
+        setMessages((prev) => [...prev, assistantMessage]);
+        await streamAssistantMessage(assistantId, assistantText, data);
+      } else {
+        setMessages((prev) => [...prev, { ...assistantMessage, text: assistantText }]);
+      }
+      if (voiceReplyOn) speak(assistantText);
       setActiveThreadId(data.chat_thread_id || activeThreadId);
       await loadHistory();
       await loadThreads();
@@ -481,15 +489,25 @@ function App() {
       }
       const data: AnalysisResult = await res.json();
       const assistantId = `a-${Date.now()}`;
-      setMessages((prev) => [...prev, {
-        id: assistantId,
-        role: 'assistant',
-        text: '',
-      }]);
-      const textOut = data.executive_summary || 'Audio analysis complete.';
-      await streamAssistantMessage(assistantId, textOut, data);
+      const assistantText = (data.response_mode && data.response_mode !== 'analysis')
+        ? (data.assistant_text || data.executive_summary || 'Done.')
+        : (data.executive_summary || 'Audio analysis complete.');
+      if (data.response_mode === 'analysis') {
+        setMessages((prev) => [...prev, {
+          id: assistantId,
+          role: 'assistant',
+          text: '',
+        }]);
+        await streamAssistantMessage(assistantId, assistantText, data);
+      } else {
+        setMessages((prev) => [...prev, {
+          id: assistantId,
+          role: 'assistant',
+          text: assistantText,
+        }]);
+      }
       setActiveThreadId(data.chat_thread_id || activeThreadId);
-      if (voiceReplyOn) speak(textOut);
+      if (voiceReplyOn) speak(assistantText);
       await loadHistory();
       await loadThreads();
     } catch (e) {
@@ -616,7 +634,7 @@ function App() {
                         <Volume2 size={14} /> Play voice
                       </button>
                     )}
-                    {msg.attachedResult && (
+                    {msg.attachedResult?.response_mode === 'analysis' && (
                       <>
                         <div className="msg-metrics">
                           <span>Topic: {msg.attachedResult.financial_topic}</span>
