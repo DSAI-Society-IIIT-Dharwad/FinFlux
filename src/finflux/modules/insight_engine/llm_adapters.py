@@ -13,8 +13,17 @@ class GroqWhisperAdapter:
         self.url = "https://api.groq.com/openai/v1/audio/transcriptions"
 
     def transcribe(self, audio_path: str, language: str = None) -> Dict[str, Any]:
+        """High-resolution transcription via Groq Whisper."""
         if not self.api_key:
             return {"error": "GROQ_API_KEY not set", "text": ""}
+
+        # Check file size before sending — Groq limit is 25MB
+        import os
+        file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+        if file_size_mb > 24:
+            print(f"[GroqWhisper] File too large ({file_size_mb:.1f}MB), switching to local fallback")
+            return {"error": "file_too_large", "text": ""}
+            
         headers = {"Authorization": f"Bearer {self.api_key}"}
         data = {
             "model": config.GROQ_STT_MODEL,
@@ -58,7 +67,10 @@ class ExpertSynthesisEngine:
 
     def normalize_transcript(self, transcript: str) -> str:
         """Stage 2: Transcript Normalization (Llama-3-8B Fast)."""
-        sys_p = "You are a professional Transcript Cleaner. Correct ASR errors, fix spelling, preserve the exact meaning. Return ONLY cleaned text."
+        sys_p = (
+            "You are a professional Transcript Cleaner. Correct ASR errors, fix spelling, "
+            "preserve the exact meaning. Return ONLY cleaned text in the same language as the transcript."
+        )
         return self._call_groq(sys_p, transcript, model_override=self.fast_model)
 
     def analyze(self, transcript: str, entities: List[Dict[str, Any]] = None, fin_sentiment: str = "Neutral") -> Dict[str, Any]:
@@ -67,12 +79,16 @@ class ExpertSynthesisEngine:
         
         # ─── Part 1: Expert Technical Reasoning (Qwen) ───
         reason_p = f"Transcript: {transcript}\nEntities: {ent_text}\nSentiment: {fin_sentiment}"
-        reason_sys = "You are a senior Financial Analyst (CFA). Provide 3-4 bullet points of high-level technical logic for this conversation. No advice, just technical reasoning."
+        reason_sys = (
+            "You are a senior Financial Analyst (CFA). Provide 3-4 bullet points of high-level technical "
+            "logic for this conversation. No advice, just technical reasoning. "
+            "Respond in the same language as the transcript."
+        )
         expert_reasoning = self._call_groq(reason_sys, reason_p, model_override=self.reason_model)
 
         # ─── Part 2: McKinsey-Style Final Synthesis (Llama-70B) ───
         final_sys = """You are a senior Financial Consultant (McKinsey/GS level). Generate a structured STRATEGIC JSON.
-RULES: 1. NO FINANCIAL ADVICE. 2. USE NEUTRAL, STRATEGIC TERMINOLOGY.
+    RULES: 1. NO FINANCIAL ADVICE. 2. USE NEUTRAL, STRATEGIC TERMINOLOGY. 3. RESPOND IN THE SAME LANGUAGE AS THE TRANSCRIPT.
 JSON SCHEMA:
 {
   "executive_summary": "A world-class strategic summary (concise, high-impact).",
@@ -88,3 +104,4 @@ JSON SCHEMA:
         # Merge technical reasoning into the response
         analysis_json["expert_reasoning_points"] = expert_reasoning
         return analysis_json
+

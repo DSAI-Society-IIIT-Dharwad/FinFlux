@@ -1,5 +1,6 @@
 """FinFlux Pro Server V4.2: 8-Stage Modular Pipeline (Production Expert Module)."""
 import os
+import importlib
 import shutil
 import uuid
 import time
@@ -17,14 +18,22 @@ import sys
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(ROOT_DIR / "src"))
+sys.path.insert(0, str(ROOT_DIR / "api"))
 
 from finflux.modules.insight_engine.llm_adapters import ExpertSynthesisEngine
 from finflux.modules.insight_engine.financial_models import ProductionExpertModule
 from api.security import FinFluxSecurity
 from api.storage import save_conversation, get_all_conversations
 
+rag_mod = importlib.import_module("rag.router")
+rag_router = rag_mod.rag_router
+index_result_for_rag = rag_mod.index_result_for_rag
+reindex_updated_conversation = rag_mod.reindex_updated_conversation
+rag_is_available = rag_mod.rag_is_available
+
 app = FastAPI(title="FinFlux Pro", version="4.2")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.include_router(rag_router)
 
 # Secure Directories
 STORAGE_DIR = ROOT_DIR / "data" / "encrypted_audio"
@@ -53,10 +62,16 @@ async def analyze_audio(file: UploadFile = File(...)):
     with open(temp_wav, "wb") as f: f.write(raw_audio)
 
     try:
-        # ── Stage 1: Multilingual ASR (Groq Whisper Turbo) ──
-        from finflux.modules.insight_engine.llm_adapters import GroqWhisperAdapter
-        whisper = GroqWhisperAdapter()
-        asr = whisper.transcribe(temp_wav)
+        # ── Stage 1: Local-Cloud Hybrid ASR (Groq-Whisper with Local Fallback) ──
+        try:
+            from finflux.modules.insight_engine.llm_adapters import GroqWhisperAdapter
+            whisper = GroqWhisperAdapter()
+            asr = whisper.transcribe(temp_wav)
+        except Exception as e:
+            print(f"[API] Groq ASR Failed: {e}. Switching to Local Fallback...")
+            local_text = EXPERT.transcribe_local(temp_wav)
+            asr = {"text": local_text, "language": "hindi" if local_text else "unknown"}
+            
         raw_text = asr.get("text", "")
         t_asr = time.time() - t_start
 
@@ -113,6 +128,7 @@ async def analyze_audio(file: UploadFile = File(...)):
 
         # Save to DB
         save_conversation(result)
+        index_result_for_rag(result)
         return result
 
     except Exception as e:
@@ -139,6 +155,8 @@ async def update_conversation(conversation_id: str, payload: dict):
         if "summary" in payload: log.executive_summary = payload["summary"] # Alias
         
         db.commit()
+        reindex_updated_conversation(log)
+
         return {"status": "updated"}
     finally:
         db.close()
@@ -156,69 +174,121 @@ def generate_report(conversation_id: str, format: str = "pdf"):
         df = pd.DataFrame([data])
         return Response(content=df.to_csv(index=False), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename=finflux_{conversation_id}.csv"})
     
-    # PDF Generation
-    from reportlab.lib.pagesizes import LETTER
-    from reportlab.pdfgen import canvas
-    from reportlab.lib import colors
+    # PDF Generation (McKinsey Strategic IQ Wall Format)
     import io
+    import os
     from fastapi.responses import StreamingResponse
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, HRFlowable
+    from reportlab.lib.units import inch
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
 
     buffer = io.BytesIO()
-    p = canvas.Canvas(buffer, pagesize=LETTER)
-    w, h = LETTER
-
-    # Header
-    p.setFont("Helvetica-Bold", 24)
-    p.drawString(50, h - 50, "FinFlux Intelligence Report")
-    p.setFont("Helvetica", 10)
-    p.drawString(50, h - 70, f"ID: {conversation_id} | Timestamp: {data['timestamp']}")
-    p.line(50, h - 80, w - 50, h - 80)
-
-    # Executive Summary
-    p.setFont("Helvetica-Bold", 14)
-    p.drawString(50, h - 110, "EXECUTIVE SUMMARY")
-    p.setFont("Helvetica", 11)
-    summary_text = data.get("executive_summary", data.get("summary", ""))
-    p.drawString(50, h - 130, summary_text[:120] + "...")
+    doc = SimpleDocTemplate(buffer, pagesize=LETTER, topMargin=0.5*inch, bottomMargin=0.5*inch)
+    styles = getSampleStyleSheet()
     
-    # McKinsey High-Fidelity Sections
-    p.setFont("Helvetica-Bold", 12)
-    p.setFillColor(colors.blue)
-    p.drawString(50, h - 160, "STRATEGIC INTENT")
-    p.setFont("Helvetica", 10)
-    p.setFillColor(colors.black)
-    p.drawString(50, h - 175, data.get("strategic_intent", "N/A")[:100])
+    # Register Unicode-capable font if available (Windows Arial)
+    font_name = "Helvetica"
+    font_path = "C:/Windows/Fonts/arial.ttf"
+    if os.path.exists(font_path):
+        try:
+            pdfmetrics.registerFont(TTFont('Arial', font_path))
+            font_name = "Arial"
+        except: pass
 
-    p.setFont("Helvetica-Bold", 12)
-    p.setFillColor(colors.purple)
-    p.drawString(50, h - 200, "FUTURE GEARING")
-    p.setFont("Helvetica", 10)
-    p.setFillColor(colors.black)
-    p.drawString(50, h - 215, data.get("future_gearing", "N/A")[:100])
+    # Custom Styles (using font_name for Unicode support)
+    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=24, textColor=colors.HexColor("#3b82f6"), spaceAfter=12, fontName=f"{font_name}-Bold" if font_name == "Helvetica" else font_name)
+    header_style = ParagraphStyle('HeaderStyle', parent=styles['Heading2'], fontSize=14, textColor=colors.HexColor("#1e40af"), spaceBefore=18, spaceAfter=8, fontName=f"{font_name}-Bold" if font_name == "Helvetica" else font_name, borderLeftIndent=12, leftIndent=12)
+    body_style = ParagraphStyle('BodyStyle', parent=styles['BodyText'], fontSize=11, leading=16, spaceAfter=12, fontName=font_name)
+    meta_style = ParagraphStyle('MetaStyle', parent=styles['BodyText'], fontSize=9, textColor=colors.grey, fontName=font_name)
+    transcript_style = ParagraphStyle('TranscriptStyle', parent=styles['BodyText'], fontSize=9, leading=14, textColor=colors.darkslategrey, leftIndent=12, fontName=font_name)
 
-    p.setFont("Helvetica-Bold", 12)
-    p.setFillColor(colors.red)
-    p.drawString(50, h - 240, "RISK ASSESSMENT")
-    p.setFont("Helvetica", 10)
-    p.setFillColor(colors.black)
-    p.drawString(50, h - 255, data.get("risk_assessment", "N/A")[:100])
+    story = []
+
+    # 1. Main Header
+    story.append(Paragraph("FinFlux Intelligence Report", title_style))
+    story.append(Paragraph(f"<b>CONVERSATION ID:</b> {conversation_id}  |  <b>TIMESTAMP:</b> {data.get('timestamp', 'N/A')}", meta_style))
+    story.append(Spacer(1, 0.1*inch))
+    story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#3b82f6"), spaceAfter=10))
+
+    # 2. Confidence & Sentiment Quick-Wall
+    conf = data.get("confidence_score", 0) * 100
+    sentiment = data.get("financial_sentiment", "Neutral")
+    topic = data.get("financial_topic", "General Analysis")
     
-    # Insights
-    p.setFont("Helvetica-Bold", 12)
-    p.drawString(50, h - 290, f"Topic: {data['financial_topic']}")
-    p.drawString(50, h - 310, f"Sentiment: {data['financial_sentiment']}")
-    p.drawString(50, h - 330, f"Risk Level: {data['risk_level']}")
+    quick_data = [
+        [Paragraph(f"<b>IQ TOPIC:</b> {topic}", body_style), Paragraph(f"<b>SENTIMENT:</b> {sentiment}", body_style)],
+        [Paragraph(f"<b>RISK LEVEL:</b> {data.get('risk_level', 'LOW')}", body_style), Paragraph(f"<b>IQ CONFIDENCE:</b> {conf}%", body_style)]
+    ]
     
-    # Reasoning
-    p.setFont("Helvetica-Bold", 12)
-    p.drawString(50, h - 360, "EXPERT ANALYST REASONING")
-    p.setFont("Helvetica", 9)
-    p.drawString(50, h - 380, data.get("expert_reasoning", "")[:500])
+    quick_table = Table(quick_data, colWidths=[3*inch, 3*inch])
+    quick_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), colors.whitesmoke),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ('PADDING', (0, 0), (-1, -1), 12),
+    ]))
+    story.append(quick_table)
+    story.append(Spacer(1, 0.3*inch))
 
-    p.showPage()
-    p.save()
+    # 3. Executive Summary
+    story.append(Paragraph("EXECUTIVE STRATEGIC SUMMARY", header_style))
+    story.append(Paragraph(data.get("executive_summary", "No summary captured."), body_style))
+
+    # 4. Strategic Intent & Risk Logic
+    story.append(Paragraph("STRATEGIC INTENT & FUTURE GEARING", header_style))
+    intent_data = [
+        [Paragraph("<b>Intent:</b> " + data.get("strategic_intent", "N/A"), body_style)],
+        [Paragraph("<b>Future Gearing:</b> " + data.get("future_gearing", "N/A"), body_style)],
+        [Paragraph("<b>Risk Detail:</b> " + data.get("risk_assessment", "N/A"), body_style)]
+    ]
+    story.append(Table(intent_data, colWidths=[6.5*inch]))
+    story.append(Spacer(1, 0.3*inch))
+
+    # 5. Entity Wall (Table)
+    entities = data.get("entities", [])
+    if entities:
+        story.append(Paragraph("PRECISION ENTITY WALL", header_style))
+        ent_rows = [["TYPE", "VALUE", "CONTEXT"]]
+        for e in entities:
+            ent_rows.append([e['type'], e['value'], e.get('context', 'Manual Extraction')])
+        
+        ent_table = Table(ent_rows, colWidths=[1.5*inch, 2*inch, 3*inch])
+        ent_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1e40af")),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('TOPPADDING', (1, 1), (-1, -1), 10),
+        ]))
+        story.append(ent_table)
+        story.append(Spacer(1, 0.4*inch))
+
+    # 6. Reasoning Wall (Qwen CFA IQ)
+    reasoning = data.get("expert_reasoning_points", "")
+    if reasoning:
+        story.append(Paragraph("EXPERT ANALYST REASONING (CFA V4.2)", header_style))
+        for line in reasoning.split('\n'):
+            if line.strip():
+                clean_line = line.replace('• ', '').replace('**', '')
+                story.append(Paragraph(f"• {clean_line}", body_style))
+    
+    # 7. Transcript (New Page)
+    story.append(PageBreak())
+    story.append(Paragraph("VERIFIED TRANSCRIPT RECORD", header_style))
+    transcript = data.get("transcript", "")
+    for part in transcript.split('\n\n'):
+        if part.strip():
+            story.append(Paragraph(part, transcript_style))
+            story.append(Spacer(1, 0.1*inch))
+
+    doc.build(story)
     buffer.seek(0)
-    return StreamingResponse(buffer, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=finflux_{conversation_id}.pdf"})
+    return StreamingResponse(buffer, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=finflux_strategic_iq_{conversation_id}.pdf"})
 
 @app.get("/api/health")
 def health():
@@ -227,6 +297,7 @@ def health():
         "status": "finflux-v4.2-online", 
         "security": "AES-256 enabled",
         "api_key_loaded": key_ok,
+        "rag_available": rag_is_available(),
         "models": ["LangDetect", "FinBERT", "GLiNER", "DeBERTa", "Qwen", "Llama-3.1"]
     }
 

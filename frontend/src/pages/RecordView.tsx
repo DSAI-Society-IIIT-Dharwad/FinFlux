@@ -16,6 +16,28 @@ interface AnalysisResult {
   transcript: string;
 }
 
+interface RagInsight {
+  contextual_insight?: string;
+  pattern_summary?: string[];
+  risk_trajectory?: string;
+  recommended_next_focus?: string[];
+  confidence?: string;
+}
+
+interface RagRetrieval {
+  results?: Array<{
+    conversation_id?: string;
+    score?: number;
+    document?: string;
+    metadata?: { timestamp?: string; risk_level?: string; topic?: string; sentiment?: string; language?: string };
+  }>;
+}
+
+interface RagResponse {
+  retrieval?: RagRetrieval;
+  insight?: RagInsight;
+}
+
 function encodeWavBlob(samples: Float32Array, sr: number): Blob {
   const bps = 16, nc = 1, ba = nc * (bps / 8), dl = samples.length * ba;
   const buf = new ArrayBuffer(44 + dl), v = new DataView(buf);
@@ -39,11 +61,54 @@ export default function RecordView() {
   const [recordingTime, setRecordingTime] = useState(0);
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [ragResult, setRagResult] = useState<RagResponse | null>(null);
+  const [ragLoading, setRagLoading] = useState(false);
+  const [ragError, setRagError] = useState('');
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number>(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchRagInsight = async (analysis: AnalysisResult) => {
+    setRagLoading(true);
+    setRagError('');
+    try {
+      const queryBase = (analysis.executive_summary || analysis.transcript || '').trim();
+      const ragQuery = queryBase.length > 420 ? `${queryBase.slice(0, 420)}...` : queryBase;
+      const res = await fetch('http://localhost:8000/api/rag/insight', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: ragQuery || 'Summarize historical risk pattern for this conversation.',
+          top_k: 6,
+          financial_sentiment: analysis.financial_sentiment || 'Neutral',
+          filters: { language: (analysis.language || '').toLowerCase() || 'unknown' }
+        })
+      });
+
+      if (!res.ok) {
+        let detail = `RAG unavailable (${res.status})`;
+        try {
+          const err = await res.json();
+          if (err?.detail) detail = String(err.detail);
+        } catch {
+          // Keep fallback message when response is not JSON.
+        }
+        setRagResult(null);
+        setRagError(detail);
+        return;
+      }
+
+      const data = await res.json();
+      setRagResult(data);
+    } catch {
+      setRagResult(null);
+      setRagError('Could not fetch RAG insight');
+    } finally {
+      setRagLoading(false);
+    }
+  };
 
   const saveChanges = async () => {
     if(!result) return;
@@ -54,7 +119,10 @@ export default function RecordView() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transcript: result.transcript, executive_summary: result.executive_summary })
       });
-      if(res.ok) setIsEditing(false);
+      if(res.ok) {
+        setIsEditing(false);
+        void fetchRagInsight(result);
+      }
       else { setErrorMsg('Save failed'); }
     } catch { setErrorMsg('Connection failed'); }
     finally { setIsSaving(false); }
@@ -112,11 +180,18 @@ export default function RecordView() {
     for(const c of chunks){ merged.set(c,off); off+=c.length; }
     const wav = new File([encodeWavBlob(merged, 16000)], 'rec.wav', { type: 'audio/wav' });
     setMode('processing');
+    setRagError('');
+    setRagResult(null);
     
     const fd = new FormData(); fd.append('file', wav);
     try {
         const res = await fetch('http://localhost:8000/api/analyze', { method: 'POST', body: fd });
-        if(res.ok) { setResult(await res.json()); setMode('done'); } 
+        if(res.ok) {
+          const analysis: AnalysisResult = await res.json();
+          setResult(analysis);
+          setMode('done');
+          void fetchRagInsight(analysis);
+        }
         else { setMode('idle'); setErrorMsg('Server Error: ' + res.statusText); }
     } catch (e) {
         setMode('idle'); setErrorMsg('Connection Error: ' + e);
@@ -129,6 +204,13 @@ export default function RecordView() {
   };
 
   const rc = (l: string) => l === 'CRITICAL' ? '#ef4444' : l === 'HIGH' ? '#f97316' : l === 'MEDIUM' ? '#f59e0b' : '#10b981';
+  const extractSummary = (doc?: string) => {
+    if (!doc) return 'No summary available.';
+    if (doc.includes('Executive Summary:')) {
+      return doc.split('Executive Summary:')[1]?.split('Transcript:')[0]?.trim() || 'No summary available.';
+    }
+    return doc.slice(0, 220);
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '32px', maxWidth: '1200px', margin: '0 auto', color: '#f8fafc' }}>
@@ -272,6 +354,98 @@ export default function RecordView() {
                   </div>
                 ))}
               </div>
+            </div>
+
+            {/* RAG Context Output */}
+            <div className="glass-panel" style={{ padding: '32px', background: 'rgba(59,130,246,0.04)', border: '1px solid rgba(59,130,246,0.2)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                <h4 style={{ margin: 0, color: '#60a5fa', fontSize: '1rem', fontWeight: 900, letterSpacing: '0.05em' }}>RAG MEMORY INSIGHT</h4>
+                <button
+                  onClick={() => result && fetchRagInsight(result)}
+                  style={{ padding: '8px 12px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.03)', color: '#e2e8f0', cursor: 'pointer', fontWeight: 700, fontSize: '0.75rem' }}
+                >
+                  REFRESH
+                </button>
+              </div>
+
+              {ragLoading && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#93c5fd' }}>
+                  <Loader2 className="spin" size={16} />
+                  <span style={{ fontSize: '0.9rem' }}>Retrieving historical sessions...</span>
+                </div>
+              )}
+
+              {!ragLoading && ragError && (
+                <p style={{ margin: 0, color: '#fda4af', fontSize: '0.9rem', lineHeight: 1.5 }}>{ragError}</p>
+              )}
+
+              {!ragLoading && !ragError && ragResult?.insight && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  <p style={{ margin: 0, color: '#f1f5f9', lineHeight: 1.65, fontSize: '0.95rem' }}>
+                    {ragResult.insight.contextual_insight || 'No contextual insight generated yet.'}
+                  </p>
+
+                  <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                    <span style={{ padding: '5px 10px', borderRadius: '999px', fontSize: '0.7rem', fontWeight: 800, background: 'rgba(96,165,250,0.2)', color: '#bfdbfe' }}>
+                      Retrieved: {(ragResult.retrieval?.results || []).length}
+                    </span>
+                    <span style={{ padding: '5px 10px', borderRadius: '999px', fontSize: '0.7rem', fontWeight: 800, background: 'rgba(16,185,129,0.2)', color: '#86efac' }}>
+                      Trajectory: {ragResult.insight.risk_trajectory || 'unknown'}
+                    </span>
+                    <span style={{ padding: '5px 10px', borderRadius: '999px', fontSize: '0.7rem', fontWeight: 800, background: 'rgba(168,85,247,0.2)', color: '#ddd6fe' }}>
+                      Confidence: {ragResult.insight.confidence || 'unknown'}
+                    </span>
+                  </div>
+
+                  {!!(ragResult.insight.pattern_summary || []).length && (
+                    <div>
+                      <div style={{ fontSize: '0.72rem', color: '#93c5fd', fontWeight: 900, marginBottom: '8px', letterSpacing: '0.05em' }}>PATTERN SUMMARY</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {(ragResult.insight.pattern_summary || []).map((point, idx) => (
+                          <div key={idx} style={{ fontSize: '0.86rem', color: '#cbd5e1', lineHeight: 1.45 }}>
+                            • {point}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {!!(ragResult.insight.recommended_next_focus || []).length && (
+                    <div>
+                      <div style={{ fontSize: '0.72rem', color: '#a7f3d0', fontWeight: 900, marginBottom: '8px', letterSpacing: '0.05em' }}>RECOMMENDED NEXT FOCUS</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {(ragResult.insight.recommended_next_focus || []).map((point, idx) => (
+                          <div key={idx} style={{ fontSize: '0.86rem', color: '#bbf7d0', lineHeight: 1.45 }}>
+                            • {point}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {!!(ragResult.retrieval?.results || []).length && (
+                    <div style={{ marginTop: '6px' }}>
+                      <div style={{ fontSize: '0.72rem', color: '#fcd34d', fontWeight: 900, marginBottom: '10px', letterSpacing: '0.05em' }}>RETRIEVED SESSIONS</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        {(ragResult.retrieval?.results || []).slice(0, 5).map((row, idx) => (
+                          <div key={idx} style={{ padding: '12px', borderRadius: '12px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)' }}>
+                            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' }}>
+                              <span style={{ fontSize: '0.68rem', color: '#93c5fd' }}>#{idx + 1}</span>
+                              <span style={{ fontSize: '0.68rem', color: '#f1f5f9' }}>{row.conversation_id || 'unknown'}</span>
+                              <span style={{ fontSize: '0.68rem', color: '#a7f3d0' }}>score {(row.score ?? 0).toFixed(2)}</span>
+                              <span style={{ fontSize: '0.68rem', color: '#fcd34d' }}>{row.metadata?.risk_level || 'UNKNOWN'}</span>
+                              <span style={{ fontSize: '0.68rem', color: '#c4b5fd' }}>{row.metadata?.topic || 'general'}</span>
+                            </div>
+                            <div style={{ fontSize: '0.84rem', color: '#cbd5e1', lineHeight: 1.45 }}>
+                              {extractSummary(row.document)}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <button onClick={()=>setMode('idle')} style={{ padding: '22px', borderRadius: '24px', background: '#3b82f6', color: 'white', border: 'none', fontWeight: 900, cursor: 'pointer', fontSize: '1.1rem', letterSpacing: '0.05em', boxShadow: '0 15px 30px -10px #3b82f6' }}>NEW STRATEGIC ANALYSIS</button>

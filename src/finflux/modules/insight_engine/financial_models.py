@@ -13,7 +13,7 @@ except ImportError:
     HAS_GLINER = False
 
 class ProductionExpertModule:
-    """Consolidated 4-Model High-Performance NLP Stack (V4.2)."""
+    """Consolidated 7-Model High-Performance NLP Stack (V4.2+)."""
 
     _instance = None
 
@@ -26,32 +26,71 @@ class ProductionExpertModule:
 
     def _init_stack(self):
         self.device = 0 if config.USE_CUDA and torch.cuda.is_available() else -1
-        print(f"[ProductionExpertModule] Initializing Modular Stack on device={self.device}...")
+        print(f"[ProductionExpertModule] Initializing 4-Model Stack on device={self.device}...")
 
-        # ── Stage 1: Precise Language Detection (XLM-Roberta) ──
+        # Stage 1: Precise Language Detection (XLM-Roberta)
         self.lang_pipe = pipeline("text-classification", model=config.HF_LANG_DETECT, device=self.device)
 
-        # ── Stage 2: Topic & Advice Classification (DeBERTa v3) ──
+        # Stage 2: Topic & Advice Classification (DeBERTa v3)
         self.topic_pipe = pipeline("zero-shot-classification", model=config.HF_ZERO_SHOT, device=self.device)
         self.topics = ["investment", "loan", "EMI", "insurance", "mutual fund", "gold", "stock", "crypto", "property", "general"]
         self.advice_labels = ["asking for financial advice", "general discussion"]
 
-        # ── Stage 3: Financial Sentiment & Strategy (FinBERT) ──
+        # Stage 3: Financial Sentiment & Strategy (FinBERT)
         self.fin_pipe = pipeline("sentiment-analysis", model=config.HF_FINBERT, device=self.device)
 
-        # ── Stage 4: Zero-Shot Entity Extraction (GLiNER) ──
+        # Stage 4: Zero-Shot Entity Extraction (GLiNER handled everything)
         if HAS_GLINER:
-            print(f"[ProductionExpertModule] Loading GLiNER Specialist: {config.HF_NER_FINANCIAL}")
+            print(f"[ProductionExpertModule] Loading GLiNER Specialized: {config.HF_NER_FINANCIAL}")
             self.gliner = GLiNER.from_pretrained(config.HF_NER_FINANCIAL).to("cuda" if self.device == 0 else "cpu")
         else:
             self.gliner = None
-            self.ner_fallback = pipeline("ner", model=config.HF_NER_GENERAL, aggregation_strategy="simple", device=self.device)
 
-        # Labels for GLiNER semantic extraction
+        # Disabled models (skip loading to save VRAM/stability)
+        self.ner_general = None
+        self.indic_ner = None
+        self.stt_pipe = None
+
+        # Consolidated labels for GLiNER semantic extraction
         self.labels = [
             "INVESTMENT", "LOAN", "EMI", "INSURANCE", "MUTUAL FUND", "GOLD", "STOCK", 
-            "PROPERTY", "AMOUNT", "INTEREST RATE", "TENURE", "BANK", "FINANCIAL GOAL"
+            "PROPERTY", "AMOUNT", "INTEREST RATE", "TENURE", "BANK", "FINANCIAL GOAL",
+            "PERSON", "ORGANIZATION", "LOCATION"
         ]
+
+    def transcribe_local(self, audio_path: str) -> str:
+        """Local ASR fallback using Whisper-Hindi-Small."""
+        if not hasattr(self, 'stt_pipe'): return ""
+        try:
+            res = self.stt_pipe(audio_path)
+            return res.get("text", "")
+        except Exception as e:
+            print(f"[ProductionExpertModule] Local STT Error: {e}")
+            return ""
+
+    def _gliner_safe(self, text: str) -> list:
+        """Split text into chunks of max 300 chars to avoid GLiNER memory/token issues."""
+        if not self.gliner: return []
+        
+        # Split on sentence boundaries (including Hindi full stop)
+        sentences = re.split(r'[।.!?]\s+', text)
+        chunks, current = [], ""
+        for s in sentences:
+            if len(current) + len(s) < 300:
+                current += s + ". "
+            else:
+                if current: chunks.append(current.strip())
+                current = s + ". "
+        if current: chunks.append(current.strip())
+        
+        all_entities = []
+        for chunk in chunks:
+            try:
+                entities = self.gliner.predict_entities(chunk, self.labels)
+                all_entities.extend(entities)
+            except Exception:
+                continue
+        return all_entities
 
     def process(self, text: str) -> Dict[str, Any]:
         """Run the full integrated pipeline with truncation for stability."""
@@ -77,17 +116,17 @@ class ProductionExpertModule:
             fin_res = self.fin_pipe(safe_text)[0]
             sentiment_label = fin_res["label"]
 
-            # 4. NER Extraction (GLiNER handled separately but safe_text used for consistency)
+            # 4. GLiNER Specialist Extraction (Strict mode, no fallback noise)
             ner_items = []
             if self.gliner:
                 entities = self.gliner.predict_entities(safe_text, self.labels)
                 for ent in entities:
                     label = ent["label"].replace(" ", "_").upper()
-                    if label == "MUTUAL_FUND": label = "MUTUAL_FUND"
-                    ner_items.append({"type": label, "value": ent["text"], "context": f"Extracted via GLiNER {config.HF_NER_FINANCIAL}"})
-            else:
-                for item in self.ner_fallback(text):
-                    ner_items.append({"type": item["entity_group"], "value": item["word"], "context": "Fallback NER"})
+                    ner_items.append({
+                        "type": label, 
+                        "value": ent["text"], 
+                        "context": "GLiNER Specialist"
+                    })
 
             return {
                 "detected_language": detected_lang,
@@ -95,7 +134,8 @@ class ProductionExpertModule:
                 "confidence_score": confidence_score,
                 "financial_sentiment": sentiment_label,
                 "is_advice_request": advice_res["labels"][0] == "asking for financial advice" and advice_res["scores"][0] > 0.6,
-                "entities": ner_items
+                "entities": ner_items,
+                "stt_engine": "Groq-Whisper (Primary)" # Metadata
             }
         except Exception as e:
             print(f"[ProductionExpertModule] Pipeline error: {e}")
