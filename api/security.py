@@ -33,7 +33,10 @@ class FinFluxSecurity:
         self.injection_keywords = [
             "ignore previous", "ignore all instructions", "system override",
             "act as an advisor", "bypass rules", "you are now a financial advisor",
-            "recommend stocks", "predict the market", "override", "system prompt"
+            "recommend stocks", "predict the market", "override", "system prompt",
+            "forget your instructions", "new persona", "act as", "pretend you are",
+            "guarantee returns", "100% returns", "risk free profit",
+            "invest in my scheme", "send money to", "wire transfer to"
         ]
 
     def encrypt_audio(self, data: bytes) -> bytes:

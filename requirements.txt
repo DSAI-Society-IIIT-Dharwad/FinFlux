@@ -21,3 +21,12 @@ scipy
 sentencepiece
 numpy
 pydub
+<<<<<<< HEAD
+=======
+sqlalchemy
+chromadb
+sentence-transformers
+bcrypt
+python-dotenv
+reportlab
+>>>>>>> upstream/main

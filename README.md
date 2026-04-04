@@ -4,10 +4,10 @@
 
 The financial advisory and wealth management sector faces significant challenges in capturing and analyzing unstructured client communications. Manual transcription and summary generation lead to:
 
-1.  **Data Loss**: Critical financial details, subtle strategic intents, and specific commitments are often lost or incorrectly recorded during manual entry.
-2.  **Inconsistency**: Subjective interpretation of risk and sentiment varies drastically between analysts, creating inconsistent reporting.
-3.  **Multilingual Friction**: Standard automated speech recognition (ASR) systems struggle with code-switching (Hinglish) and regional nuances in financial terminology.
-4.  **Audit Latency**: High-fidelity records and PDF reports for compliance take hours or days to generate, delaying strategic response time.
+1. **Data Loss**: Critical financial details, subtle strategic intents, and specific commitments are often lost or incorrectly recorded during manual entry.
+2. **Inconsistency**: Subjective interpretation of risk and sentiment varies drastically between analysts, creating inconsistent reporting.
+3. **Multilingual Friction**: Standard automated speech recognition (ASR) systems struggle with code-switching (Hinglish) and regional nuances in financial terminology.
+4. **Audit Latency**: High-fidelity records and PDF reports for compliance take hours or days to generate, delaying strategic response time.
 
 FinFlux addresses these challenges by implementing an automated, high-fidelity 12-model pipeline that transforms raw audio into consistent, logic-backed strategic intelligence.
 
