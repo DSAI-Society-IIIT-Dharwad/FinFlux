@@ -92,6 +92,8 @@ function App() {
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [recordingLevels, setRecordingLevels] = useState<number[]>(Array.from({ length: 28 }, () => 0.06));
   const [error, setError] = useState('');
   const [voiceReplyOn, setVoiceReplyOn] = useState(true);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -103,6 +105,9 @@ function App() {
   const streamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const scriptNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const levelFrameRef = useRef<number | null>(null);
+  const timerRef = useRef<number | null>(null);
   const pcmBufferRef = useRef<Float32Array[]>([]);
 
   const authFetch = async (path: string, options: RequestInit = {}) => {
@@ -355,6 +360,11 @@ function App() {
       const ctx = new AudioContext({ sampleRate: 16000 });
       audioCtxRef.current = ctx;
       const src = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.7;
+      analyserRef.current = analyser;
+      src.connect(analyser);
       const sn = ctx.createScriptProcessor(4096, 1, 1);
       pcmBufferRef.current = [];
       sn.onaudioprocess = (e) => {
@@ -363,6 +373,29 @@ function App() {
       src.connect(sn);
       sn.connect(ctx.destination);
       scriptNodeRef.current = sn;
+
+      const animateLevels = () => {
+        const a = analyserRef.current;
+        if (!a) return;
+        const arr = new Uint8Array(a.frequencyBinCount);
+        a.getByteFrequencyData(arr);
+        const step = Math.max(1, Math.floor(arr.length / 28));
+        const next = Array.from({ length: 28 }, (_, i) => {
+          const start = i * step;
+          const end = Math.min(arr.length, start + step);
+          let sum = 0;
+          for (let j = start; j < end; j++) sum += arr[j];
+          const avg = end > start ? sum / (end - start) : 0;
+          return Math.max(0.06, Math.min(1, avg / 255));
+        });
+        setRecordingLevels(next);
+        levelFrameRef.current = window.requestAnimationFrame(animateLevels);
+      };
+
+      if (timerRef.current) window.clearInterval(timerRef.current);
+      timerRef.current = window.setInterval(() => setRecordingSeconds((v) => v + 1), 1000);
+      setRecordingSeconds(0);
+      animateLevels();
       setIsRecording(true);
       setError('');
     } catch (e) {
@@ -370,14 +403,48 @@ function App() {
     }
   };
 
+  const cleanupRecording = () => {
+    if (levelFrameRef.current !== null) {
+      window.cancelAnimationFrame(levelFrameRef.current);
+      levelFrameRef.current = null;
+    }
+    if (timerRef.current !== null) {
+      window.clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    scriptNodeRef.current?.disconnect();
+    scriptNodeRef.current = null;
+    analyserRef.current = null;
+    if (audioCtxRef.current) {
+      void audioCtxRef.current.close();
+      audioCtxRef.current = null;
+    }
+    setRecordingLevels(Array.from({ length: 28 }, () => 0.06));
+  };
+
+  const cancelRecord = () => {
+    if (!isRecording) return;
+    cleanupRecording();
+    pcmBufferRef.current = [];
+    setIsRecording(false);
+    setRecordingSeconds(0);
+    setError('Recording canceled.');
+  };
+
   const stopRecord = async () => {
     if (!isRecording) return;
     setIsRecording(false);
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    scriptNodeRef.current?.disconnect();
+    cleanupRecording();
 
     const chunks = pcmBufferRef.current;
     const total = chunks.reduce((sum, c) => sum + c.length, 0);
+    if (total === 0) {
+      setError('No audio captured. Please record again.');
+      setRecordingSeconds(0);
+      return;
+    }
     const merged = new Float32Array(total);
     let offset = 0;
     for (const c of chunks) {
@@ -416,6 +483,7 @@ function App() {
       setError(String(e));
     } finally {
       setIsSending(false);
+      setRecordingSeconds(0);
     }
   };
 
@@ -606,6 +674,37 @@ function App() {
             </div>
 
             <div className="composer">
+              <div className="audio-first-panel">
+                <div className="audio-panel-head">
+                  <div>
+                    <div className="audio-title">Audio First Capture</div>
+                    <div className="audio-subtitle">Record the call input first, then add optional text below</div>
+                  </div>
+                  <div className="recording-time">{`${Math.floor(recordingSeconds / 60).toString().padStart(2, '0')}:${(recordingSeconds % 60).toString().padStart(2, '0')}`}</div>
+                </div>
+
+                <div className="spike-row" aria-hidden="true">
+                  {recordingLevels.map((lvl, i) => (
+                    <span key={i} className={`spike ${isRecording ? 'active' : ''}`} style={{ height: `${Math.max(10, Math.round(56 * lvl))}px` }} />
+                  ))}
+                </div>
+
+                <div className="audio-panel-actions">
+                  {!isRecording ? (
+                    <button className="audio-btn" onClick={startRecord} disabled={isSending}>
+                      <Mic size={16} /> Start Recording
+                    </button>
+                  ) : (
+                    <>
+                      <button className="audio-btn recording" onClick={stopRecord}>
+                        <Mic size={16} /> Stop & Send
+                      </button>
+                      <button className="audio-cancel-btn" onClick={cancelRecord}>Cancel</button>
+                    </>
+                  )}
+                </div>
+              </div>
+
               <textarea
                 placeholder="Ask FinFlux anything about this conversation..."
                 value={input}
