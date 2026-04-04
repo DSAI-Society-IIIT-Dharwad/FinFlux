@@ -207,7 +207,24 @@ export default function RecordView() {
                 {isEditing ? (
                   <textarea value={result.transcript} onChange={(e)=>setResult({...result, transcript: e.target.value})} style={{ width: '100%', height: '200px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '16px', color: '#94a3b8', padding: '20px', fontSize: '1rem', outline: 'none', lineHeight: 1.6 }} />
                 ) : (
-                  <div style={{ fontSize: '1.05rem', color: '#94a3b8', lineHeight: 1.8 }}>{result.transcript}</div>
+                  <div style={{ marginTop: '16px' }}>
+                      {result.transcript
+                        .split('\n\n')
+                        .filter(p => p.trim())
+                        .map((paragraph, i) => (
+                          <p key={i} style={{ 
+                            fontSize: '1.02rem', 
+                            color: '#94a3b8', 
+                            lineHeight: 2.0, 
+                            marginBottom: '20px',
+                            borderLeft: paragraph.trim().startsWith('Speaker') ? '3px solid #3b82f6' : 'none',
+                            paddingLeft: paragraph.trim().startsWith('Speaker') ? '16px' : '0'
+                          }}>
+                            {paragraph}
+                          </p>
+                        ))
+                      }
+                  </div>
                 )}
               </div>
 
@@ -225,7 +242,29 @@ export default function RecordView() {
               {/* Advanced Reasoning Wall (Structured LLM-Style) */}
               <div style={{ marginTop: '40px', padding: '32px', background: 'rgba(0,0,0,0.3)', borderRadius: '24px', border: '1px solid rgba(255,255,255,0.03)' }}>
                   <h4 style={{ fontSize: '0.9rem', color: '#64748b', marginBottom: '20px', textTransform: 'uppercase', fontWeight: 900, letterSpacing: '0.1em', display: 'flex', alignItems: 'center', gap: '12px' }}><CheckCircle size={18} color="#10b981" /> Strategic Technical Wall (Qwen)</h4>
-                  <div style={{ fontSize: '1.05rem', color: '#f1f5f9', lineHeight: 1.9, whiteSpace: 'pre-line', borderLeft: '3px solid #10b981', paddingLeft: '24px' }}>{result.expert_reasoning_points}</div>
+                  <div style={{ borderLeft: '3px solid #10b981', paddingLeft: '24px' }}>
+                      {result.expert_reasoning_points
+                        .split('\n')
+                        .filter(line => line.trim())
+                        .map((line, i) => {
+                          const parts = line.split(/\*\*(.*?)\*\*/g);
+                          return (
+                            <p key={i} style={{ 
+                              fontSize: '1rem', 
+                              color: line.trim().startsWith('•') ? '#f1f5f9' : '#94a3b8', 
+                              lineHeight: 1.8, 
+                              marginBottom: '12px' 
+                            }}>
+                              {parts.map((part, j) => 
+                                j % 2 === 1 
+                                  ? <strong key={j} style={{ color: '#10b981', fontWeight: 700 }}>{part}</strong>
+                                  : part
+                              )}
+                            </p>
+                          );
+                        })
+                      }
+                  </div>
               </div>
             </div>
 

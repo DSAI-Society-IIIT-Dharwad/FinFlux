@@ -2,6 +2,7 @@
 import os
 import torch
 import json
+import re
 from typing import Dict, Any, List
 from transformers import pipeline
 from finflux import config
@@ -18,11 +19,17 @@ class ProductionExpertModule:
     _instance = None
 
     def __new__(cls):
-        """Singleton pattern: Load models ONCE to save 3GB VRAM."""
+        """Singleton pattern: Optimized lazy loading stack."""
         if cls._instance is None:
             cls._instance = super(ProductionExpertModule, cls).__new__(cls)
-            cls._instance._init_stack()
+            cls._instance.loaded = False
         return cls._instance
+
+    def warm(self):
+        """Manually trigger model stack loading."""
+        if not self.loaded:
+            self._init_stack()
+            self.loaded = True
 
     def _init_stack(self):
         self.device = 0 if config.USE_CUDA and torch.cuda.is_available() else -1
@@ -53,34 +60,59 @@ class ProductionExpertModule:
             "PROPERTY", "AMOUNT", "INTEREST RATE", "TENURE", "BANK", "FINANCIAL GOAL"
         ]
 
+    def _gliner_safe(self, text: str) -> list:
+        """Split text into chunks of max 300 chars to avoid GLiNER memory/token issues."""
+        if not self.gliner: return []
+        
+        # Split on sentence boundaries (including Hindi full stop)
+        sentences = re.split(r'[।.!?]\s+', text)
+        chunks, current = [], ""
+        for s in sentences:
+            if len(current) + len(s) < 300:
+                current += s + ". "
+            else:
+                if current: chunks.append(current.strip())
+                current = s + ". "
+        if current: chunks.append(current.strip())
+        
+        all_entities = []
+        for chunk in chunks:
+            try:
+                entities = self.gliner.predict_entities(chunk, self.labels)
+                all_entities.extend(entities)
+            except Exception:
+                continue
+        return all_entities
+
     def process(self, text: str) -> Dict[str, Any]:
-        """Run the full integrated pipeline with truncation for stability."""
+        """Run the full integrated pipeline with lazy loading."""
+        if not self.loaded: self.warm()
         if not text.strip(): return {"error": "Empty input"}
 
         try:
             # 0. Truncation Gating (Prevent model overflow)
             # Most local models (DeBERTa, FinBERT) have 512 token limit.
-            # Truncating to ~1800 chars safely fits.
-            safe_text = text[:1800]
+            # Truncating to ~1200 chars safely fits well within 512 tokens.
+            safe_text = text[:1200]
 
             # 1. Language Logic
-            lang_res = self.lang_pipe(safe_text)[0]
+            lang_res = self.lang_pipe(safe_text, truncation=True)[0]
             detected_lang = lang_res["label"]
 
             # 2. Topic & Advice Logic
-            topic_res = self.topic_pipe(safe_text, candidate_labels=self.topics, multi_label=True)
-            advice_res = self.topic_pipe(safe_text, candidate_labels=self.advice_labels, multi_label=False)
+            topic_res = self.topic_pipe(safe_text, candidate_labels=self.topics, multi_label=True, truncation=True)
+            advice_res = self.topic_pipe(safe_text, candidate_labels=self.advice_labels, multi_label=False, truncation=True)
             top_topic = topic_res["labels"][0]
             confidence_score = round(topic_res["scores"][0], 2)
 
             # 3. FinBERT Sentiment/Urgency
-            fin_res = self.fin_pipe(safe_text)[0]
+            fin_res = self.fin_pipe(safe_text, truncation=True)[0]
             sentiment_label = fin_res["label"]
 
-            # 4. NER Extraction (GLiNER handled separately but safe_text used for consistency)
+            # 4. NER Extraction (GLiNER handled separately via safe chunking)
             ner_items = []
             if self.gliner:
-                entities = self.gliner.predict_entities(safe_text, self.labels)
+                entities = self._gliner_safe(safe_text)
                 for ent in entities:
                     label = ent["label"].replace(" ", "_").upper()
                     if label == "MUTUAL_FUND": label = "MUTUAL_FUND"

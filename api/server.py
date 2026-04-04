@@ -121,6 +121,16 @@ async def analyze_audio(file: UploadFile = File(...)):
     finally:
         if os.path.exists(temp_wav): os.remove(temp_wav)
 
+@app.get("/api/warm")
+def warm_models():
+    """Manually pre-load modular NLP models (VRAM-heavy)."""
+    try:
+        t_start = time.time()
+        EXPERT.warm()
+        return {"status": "modular_stack_online", "loading_s": round(time.time() - t_start, 2)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Warm-up failed: {str(e)}")
+
 @app.get("/api/results")
 def list_results():
     return get_all_conversations()
