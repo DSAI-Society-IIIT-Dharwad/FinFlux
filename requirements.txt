@@ -26,3 +26,5 @@ sentence-transformers
 bcrypt
 python-dotenv
 reportlab
+cryptography
+pandas

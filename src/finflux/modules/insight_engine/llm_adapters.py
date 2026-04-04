@@ -3,9 +3,11 @@ import os
 import requests
 import json
 import re
+import tempfile
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 from finflux import config
+from pydub import AudioSegment
 
 class GroqWhisperAdapter:
     """Groq Whisper API for multilingual transcription."""
@@ -13,30 +15,79 @@ class GroqWhisperAdapter:
         self.api_key = api_key or config.GROQ_API_KEY
         self.url = "https://api.groq.com/openai/v1/audio/transcriptions"
 
+    def _compress_for_stt(
+        self,
+        source_path: str,
+        frame_rate: int = 16000,
+        channels: int = 1,
+        sample_width: int = 2,
+        max_seconds: Optional[int] = None,
+    ) -> str:
+        """Create a temporary WAV optimized for low upload size while preserving speech intelligibility."""
+        audio = AudioSegment.from_file(source_path)
+        if max_seconds and max_seconds > 0:
+            audio = audio[: max_seconds * 1000]
+        audio = audio.set_frame_rate(frame_rate).set_channels(channels).set_sample_width(sample_width)
+
+        fd, out_path = tempfile.mkstemp(prefix="finflux_stt_", suffix=".wav")
+        os.close(fd)
+        audio.export(out_path, format="wav")
+        return out_path
+
     def transcribe(self, audio_path: str, language: Optional[str] = None) -> Dict[str, Any]:
         """High-resolution transcription via Groq Whisper."""
         if not self.api_key:
             return {"error": "GROQ_API_KEY not set", "text": ""}
 
-        # Check file size before sending — Groq limit is 25MB
-        file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-        if file_size_mb > 24:
-            print(f"[GroqWhisper] File too large ({file_size_mb:.1f}MB), switching to local fallback")
-            return {"error": "file_too_large", "text": ""}
-            
         headers = {"Authorization": f"Bearer {self.api_key}"}
         data = {
             "model": config.GROQ_STT_MODEL,
             "response_format": "verbose_json",
         }
         if language: data["language"] = language
+
+        upload_path = audio_path
+        temp_paths: List[str] = []
+
+        # Proactively compress large-ish wav payloads before Groq upload.
         try:
-            with open(audio_path, "rb") as f:
+            file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+            if file_size_mb > 1.0:
+                upload_path = self._compress_for_stt(audio_path, frame_rate=16000, channels=1, sample_width=2)
+                temp_paths.append(upload_path)
+        except Exception:
+            upload_path = audio_path
+
+        try:
+            with open(upload_path, "rb") as f:
                 response = requests.post(
                     self.url, headers=headers,
-                    files={"file": (Path(audio_path).name, f, "audio/wav")},
+                    files={"file": (Path(upload_path).name, f, "audio/wav")},
                     data=data, timeout=60
                 )
+
+            # Retry once with aggressive compression if Groq rejects payload size.
+            if response.status_code == 413:
+                try:
+                    retry_path = self._compress_for_stt(
+                        source_path=audio_path,
+                        frame_rate=12000,
+                        channels=1,
+                        sample_width=2,
+                        max_seconds=300,
+                    )
+                    temp_paths.append(retry_path)
+                    with open(retry_path, "rb") as f2:
+                        response = requests.post(
+                            self.url,
+                            headers=headers,
+                            files={"file": (Path(retry_path).name, f2, "audio/wav")},
+                            data=data,
+                            timeout=60,
+                        )
+                except Exception:
+                    pass
+
             response.raise_for_status()
             res = response.json()
             segments = res.get("segments", []) if isinstance(res, dict) else []
@@ -68,6 +119,13 @@ class GroqWhisperAdapter:
             }
         except Exception as e:
             return {"error": f"Transcription failed: {str(e)}", "text": ""}
+        finally:
+            for p in temp_paths:
+                try:
+                    if p and os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    continue
 
 class ExpertSynthesisEngine:
     """World-Class McKinsey-Style Strategic Synthesis for FinFlux V4.2+."""

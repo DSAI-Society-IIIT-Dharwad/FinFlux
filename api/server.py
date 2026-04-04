@@ -841,6 +841,7 @@ def me(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
 async def analyze_audio(
     file: UploadFile = File(...),
     thread_id: str = Form(""),
+    asr_language: str = Form(""),
     current_user: str = Depends(get_current_user),
 ):
     """The 8-Stage Modular Pipeline V4.2."""
@@ -862,7 +863,12 @@ async def analyze_audio(
         try:
             from finflux.modules.insight_engine.llm_adapters import GroqWhisperAdapter
             whisper = GroqWhisperAdapter()
-            asr = whisper.transcribe(temp_wav)
+            lang_hint = asr_language.strip().lower()
+            if lang_hint not in {"hi", "en", "hindi", "english"}:
+                lang_hint = ""
+            asr = whisper.transcribe(temp_wav, language=lang_hint or None)
+            if not str(asr.get("text", "")).strip():
+                raise RuntimeError(str(asr.get("error", "empty_transcript")))
         except Exception as e:
             print(f"[API] Groq ASR Failed: {e}. Switching to Local Fallback...")
             local_text = EXPERT.transcribe_local(temp_wav)
