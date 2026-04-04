@@ -1,0 +1,292 @@
+import { useState, useRef, useCallback } from 'react';
+import { Mic, Square, Loader2, Tag, ShieldAlert, Sparkles, TrendingUp, ShieldCheck, Download, Edit2, Save, FileText, CheckCircle } from 'lucide-react';
+
+interface Entity { type: string; value: string; context: string }
+interface AnalysisResult {
+  conversation_id: string; timestamp: string; language: string;
+  financial_topic: string; risk_level: string;
+  advice_request: boolean; injection_attempt: boolean;
+  entities: Entity[]; executive_summary: string; key_insights: string[];
+  confidence_score: number; timing: any;
+  financial_sentiment: string;
+  expert_reasoning_points: string;
+  future_gearing: string;
+  strategic_intent: string;
+  risk_assessment: string;
+  transcript: string;
+}
+
+function encodeWavBlob(samples: Float32Array, sr: number): Blob {
+  const bps = 16, nc = 1, ba = nc * (bps / 8), dl = samples.length * ba;
+  const buf = new ArrayBuffer(44 + dl), v = new DataView(buf);
+  const ws = (o: number, s: string) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  ws(0,'RIFF'); v.setUint32(4,36+dl,true); ws(8,'WAVE'); ws(12,'fmt ');
+  v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,nc,true);
+  v.setUint32(24,sr,true); v.setUint32(28,sr*ba,true); v.setUint16(32,ba,true);
+  v.setUint16(34,bps,true); ws(36,'data'); v.setUint32(40,dl,true);
+  let o = 44;
+  for (let i = 0; i < samples.length; i++, o += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+export default function RecordView() {
+  const [mode, setMode] = useState<'idle' | 'recording' | 'processing' | 'done'>('idle');
+  const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [recordingTime, setRecordingTime] = useState(0);
+  const [isEditing, setIsEditing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const animFrameRef = useRef<number>(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const saveChanges = async () => {
+    if(!result) return;
+    setIsSaving(true);
+    try {
+      const res = await fetch(`http://localhost:8000/api/update/${result.conversation_id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcript: result.transcript, executive_summary: result.executive_summary })
+      });
+      if(res.ok) setIsEditing(false);
+      else { setErrorMsg('Save failed'); }
+    } catch { setErrorMsg('Connection failed'); }
+    finally { setIsSaving(false); }
+  };
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const scriptNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const pcmBufferRef = useRef<Float32Array[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  const drawWaveform = useCallback(() => {
+    const c = canvasRef.current, a = analyserRef.current;
+    if (!c || !a) return;
+    const ctx = c.getContext('2d'); if (!ctx) return;
+    const len = a.frequencyBinCount, d = new Uint8Array(len);
+    a.getByteTimeDomainData(d);
+    ctx.fillStyle = 'black'; ctx.fillRect(0,0,c.width,c.height);
+
+    ctx.lineWidth = 3; ctx.strokeStyle = '#3b82f6'; ctx.shadowColor = '#3b82f6'; ctx.shadowBlur = 12;
+    ctx.beginPath();
+    const sw = c.width / len; let x = 0;
+    for (let i = 0; i < len; i++) {
+      const y = (d[i]/128)*(c.height/2);
+      i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+      x+=sw;
+    }
+    ctx.lineTo(c.width, c.height/2); ctx.stroke(); ctx.shadowBlur = 0;
+    animFrameRef.current = requestAnimationFrame(drawWaveform);
+  }, []);
+
+  const startRecord = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const actx = new AudioContext({ sampleRate: 16000 }); audioCtxRef.current = actx;
+      const src = actx.createMediaStreamSource(stream);
+      const an = actx.createAnalyser(); an.fftSize = 2048; src.connect(an); analyserRef.current = an;
+      pcmBufferRef.current = [];
+      const sn = actx.createScriptProcessor(4096, 1, 1);
+      sn.onaudioprocess = (e) => pcmBufferRef.current.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      src.connect(sn); sn.connect(actx.destination); scriptNodeRef.current = sn;
+      setMode('recording'); setRecordingTime(0);
+      timerRef.current = setInterval(() => setRecordingTime(t=>t+1), 1000);
+      drawWaveform();
+    } catch { setErrorMsg('Mic Error'); }
+  };
+
+  const stopRecord = async () => {
+    cancelAnimationFrame(animFrameRef.current);
+    if(timerRef.current) clearInterval(timerRef.current);
+    streamRef.current?.getTracks().forEach(t=>t.stop());
+    scriptNodeRef.current?.disconnect();
+    
+    const chunks = pcmBufferRef.current, total = chunks.reduce((s,c)=>s+c.length,0);
+    const merged = new Float32Array(total); let off=0;
+    for(const c of chunks){ merged.set(c,off); off+=c.length; }
+    const wav = new File([encodeWavBlob(merged, 16000)], 'rec.wav', { type: 'audio/wav' });
+    setMode('processing');
+    
+    const fd = new FormData(); fd.append('file', wav);
+    try {
+        const res = await fetch('http://localhost:8000/api/analyze', { method: 'POST', body: fd });
+        if(res.ok) { setResult(await res.json()); setMode('done'); } 
+        else { setMode('idle'); setErrorMsg('Server Error: ' + res.statusText); }
+    } catch (e) {
+        setMode('idle'); setErrorMsg('Connection Error: ' + e);
+    }
+  };
+
+  const downloadReport = (type: 'pdf' | 'csv') => {
+    if(!result) return;
+    window.open(`http://localhost:8000/api/report/${result.conversation_id}?format=${type}`, '_blank');
+  };
+
+  const rc = (l: string) => l === 'CRITICAL' ? '#ef4444' : l === 'HIGH' ? '#f97316' : l === 'MEDIUM' ? '#f59e0b' : '#10b981';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '32px', maxWidth: '1200px', margin: '0 auto', color: '#f8fafc' }}>
+      
+      {/* McKinsey Gating Header */}
+      <div style={{ textAlign: 'center', padding: '40px 0 20px' }}>
+        <h1 style={{ fontSize: '2.8rem', fontWeight: 900, letterSpacing: '-0.05em', background: 'linear-gradient(135deg, #f8fafc 0%, #3b82f6 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+          {mode === 'idle' ? 'Secure IQ Gating' : mode === 'recording' ? 'Strategic Capture' : mode === 'processing' ? 'McKinsey IQ Pipeline' : 'Strategic Intelligence Wall'}
+        </h1>
+        <p style={{ color: '#94a3b8', marginTop: '10px', fontSize: '1rem', fontWeight: 600 }}>MCKINSEY-LEVEL STRATEGIC INSIGHTS · 12-MODEL PRO PIPELINE · V4.2+</p>
+      </div>
+
+      {errorMsg && (
+        <div className="animate-in fade-in" style={{ padding: '16px 24px', borderRadius: '16px', background: 'rgba(239,68,68,0.1)', border: '1px solid #ef4444', color: '#ef4444', display: 'flex', gap: '12px', alignItems: 'center' }}>
+          <ShieldAlert size={20} />
+          <span style={{ fontSize: '0.9rem', fontWeight: 600 }}>{errorMsg}</span>
+        </div>
+      )}
+
+      {/* Capture Area */}
+      {mode !== 'done' && (
+        <div style={{ padding: '100px 60px', borderRadius: '40px', background: 'rgba(255,255,255,0.015)', border: '1px solid rgba(255,255,255,0.05)', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
+          {mode === 'recording' && <canvas ref={canvasRef} width={800} height={120} style={{ position: 'absolute', bottom: 0, left: 0, width: '100%', opacity: 0.2 }} />}
+          
+          <button onClick={mode === 'idle' ? startRecord : stopRecord} 
+            style={{ width: '140px', height: '140px', borderRadius: '50%', border: 'none', background: mode === 'recording' ? '#ef4444' : '#3b82f6', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto', transition: 'all 0.4s cubic-bezier(0.4, 0, 0.2, 1)', transform: mode === 'recording' ? 'scale(1.15)' : 'scale(1)', boxShadow: mode === 'recording' ? '0 0 80px rgba(239,68,68,0.5)' : '0 0 80px rgba(59,130,246,0.2)' }}>
+            {mode === 'idle' ? <Mic size={64} color="white" /> : <Square size={52} color="white" />}
+          </button>
+          
+          <div style={{ marginTop: '50px' }}>
+            {mode === 'recording' ? <span style={{ fontSize: '2.2rem', fontFamily: 'monospace', fontWeight: 900, color: 'white' }}>{Math.floor(recordingTime/60)}:{(recordingTime%60).toString().padStart(2,'0')}</span> :
+             mode === 'processing' ? <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', alignItems: 'center' }}><Loader2 className="spin" size={40} color="#3b82f6" /><span style={{ fontSize: '1.2rem', opacity: 0.8, fontWeight: 700, letterSpacing: '0.05em' }}>Executing McKinsey Synthesis Engine (Llama 70B)...</span></div> :
+             <span style={{ fontSize: '1.1rem', opacity: 0.4, fontWeight: 600 }}>Tap to Capture High-Value Financial Intel</span>}
+          </div>
+        </div>
+      )}
+
+      {/* McKinsey Strategic Wall (V4.2+) */}
+      {result && mode === 'done' && (
+        <div className="animate-in fade-in slide-in-from-bottom-20 duration-1000" style={{ display: 'grid', gridTemplateColumns: '7.5fr 4.5fr', gap: '32px' }}>
+          
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+            {/* Top Strategic Toolbar */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ display: 'flex', gap: '12px' }}>
+                     <div style={{ padding: '8px 16px', background: 'rgba(59,130,246,0.1)', borderRadius: '100px', fontSize: '0.8rem', fontWeight: 900, color: '#3b82f6', border: '1px solid rgba(59,130,246,0.2)', letterSpacing: '0.05em' }}>MCKINSEY ANALYSIS</div>
+                     <div style={{ padding: '8px 16px', background: 'rgba(16,185,129,0.1)', borderRadius: '100px', fontSize: '0.8rem', fontWeight: 900, color: '#10b981', border: '1px solid rgba(16,185,129,0.2)', letterSpacing: '0.05em' }}>{result.financial_sentiment.toUpperCase()} SENTIMENT</div>
+                </div>
+                <div style={{ display: 'flex', gap: '15px' }}>
+                    <button onClick={()=>downloadReport('pdf')} className="btn-m" style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(255,255,255,0.03)', padding: '10px 18px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.08)', cursor: 'pointer', color: 'white', fontWeight: 700 }}><Download size={16} /> PDF Report</button>
+                    {isEditing ? (
+                      <button onClick={saveChanges} style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#10b981', padding: '10px 18px', borderRadius: '12px', border: 'none', cursor: 'pointer', color: 'white', fontWeight: 700 }}>
+                        {isSaving ? <Loader2 className="spin" size={16} /> : <Save size={16} />} Save Changes
+                      </button>
+                    ) : (
+                      <button onClick={()=>setIsEditing(true)} style={{ background: 'rgba(255,255,255,0.03)', padding: '10px 18px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.08)', cursor: 'pointer', color: 'white', fontWeight: 700 }}><Edit2 size={16} /></button>
+                    )}
+                </div>
+            </div>
+
+            {/* Strategic Summary Panel */}
+            <div className="glass-panel" style={{ padding: '40px', background: 'rgba(255,255,255,0.015)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px' }}>
+                <h3 style={{ margin: 0, color: '#3b82f6', display: 'flex', alignItems: 'center', gap: '12px', fontSize: '1.5rem', fontWeight: 900 }}><Sparkles size={24} /> Executive Strategic Summary</h3>
+              </div>
+              
+              {isEditing ? (
+                  <textarea value={result.executive_summary} onChange={(e)=>setResult({...result, executive_summary: e.target.value})} style={{ width: '100%', height: '140px', background: 'rgba(0,0,0,0.4)', border: '1px solid #3b82f6', borderRadius: '16px', color: 'white', padding: '20px', fontSize: '1.1rem', outline: 'none' }} />
+              ) : (
+                  <p style={{ fontSize: '1.3rem', lineHeight: 1.7, fontWeight: 500, color: '#f8fafc' }}>{result.executive_summary}</p>
+              )}
+
+              {/* Verified Transcript Section */}
+              <div style={{ marginTop: '32px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '32px' }}>
+                <h4 style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '1rem', color: '#64748b', marginBottom: '16px', fontWeight: 800 }}><FileText size={18} /> Verified Transcript</h4>
+                {isEditing ? (
+                  <textarea value={result.transcript} onChange={(e)=>setResult({...result, transcript: e.target.value})} style={{ width: '100%', height: '200px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '16px', color: '#94a3b8', padding: '20px', fontSize: '1rem', outline: 'none', lineHeight: 1.6 }} />
+                ) : (
+                  <div style={{ fontSize: '1.05rem', color: '#94a3b8', lineHeight: 1.8 }}>{result.transcript}</div>
+                )}
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginTop: '32px' }}>
+                  <div style={{ padding: '24px', background: 'rgba(59,130,246,0.03)', borderRadius: '20px', border: '1px solid rgba(59,130,246,0.2)' }}>
+                      <h4 style={{ fontSize: '0.8rem', color: '#3b82f6', marginBottom: '12px', textTransform: 'uppercase', fontWeight: 900, letterSpacing: '0.05em' }}>Strategic Intent</h4>
+                      <p style={{ fontSize: '1rem', opacity: 0.9, lineHeight: 1.5 }}>{result.strategic_intent}</p>
+                  </div>
+                  <div style={{ padding: '24px', background: 'rgba(168,85,247,0.03)', borderRadius: '20px', border: '1px solid rgba(168,85,247,0.2)' }}>
+                      <h4 style={{ fontSize: '0.8rem', color: '#a855f7', marginBottom: '12px', textTransform: 'uppercase', fontWeight: 900, letterSpacing: '0.05em' }}>Future Gearing</h4>
+                      <p style={{ fontSize: '1rem', opacity: 0.9, lineHeight: 1.5 }}>{result.future_gearing}</p>
+                  </div>
+              </div>
+
+              {/* Advanced Reasoning Wall (Structured LLM-Style) */}
+              <div style={{ marginTop: '40px', padding: '32px', background: 'rgba(0,0,0,0.3)', borderRadius: '24px', border: '1px solid rgba(255,255,255,0.03)' }}>
+                  <h4 style={{ fontSize: '0.9rem', color: '#64748b', marginBottom: '20px', textTransform: 'uppercase', fontWeight: 900, letterSpacing: '0.1em', display: 'flex', alignItems: 'center', gap: '12px' }}><CheckCircle size={18} color="#10b981" /> Strategic Technical Wall (Qwen)</h4>
+                  <div style={{ fontSize: '1.05rem', color: '#f1f5f9', lineHeight: 1.9, whiteSpace: 'pre-line', borderLeft: '3px solid #10b981', paddingLeft: '24px' }}>{result.expert_reasoning_points}</div>
+              </div>
+            </div>
+
+            {/* Strategic Topic Card */}
+            <div className="glass-panel" style={{ padding: '32px' }}>
+               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <h4 style={{ fontSize: '0.8rem', marginBottom: '8px', opacity: 0.4, textTransform: 'uppercase', fontWeight: 900 }}>Strategic Gating</h4>
+                    <div style={{ fontSize: '1.8rem', fontWeight: 900, letterSpacing: '-0.02em' }}>{result.financial_topic}</div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: '2.5rem', fontWeight: 900, color: '#3b82f6' }}>{Math.round(result.confidence_score*100)}%</div>
+                    <div style={{ fontSize: '0.7rem', opacity: 0.4 }}>CONFIDENCE IQ</div>
+                  </div>
+               </div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
+            {/* World-Class Risk Analysis */}
+            <div className="glass-panel" style={{ padding: '40px', background: `linear-gradient(to bottom, ${rc(result.risk_level)}10, transparent)` }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '15px', marginBottom: '24px' }}>
+                  <ShieldCheck size={40} style={{ color: rc(result.risk_level) }} />
+                  <div>
+                      <h4 style={{ fontSize: '0.8rem', opacity: 0.6, textTransform: 'uppercase', fontWeight: 900 }}>Risk Profile</h4>
+                      <div style={{ fontSize: '2.6rem', fontWeight: 900, color: rc(result.risk_level), letterSpacing: '-0.06em' }}>{result.risk_level}</div>
+                  </div>
+              </div>
+              <p style={{ fontSize: '0.95rem', opacity: 0.8, lineHeight: 1.6, borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '20px' }}>{result.risk_assessment}</p>
+            </div>
+
+            {/* High-Precision GLiNER Entities */}
+            <div className="glass-panel" style={{ padding: '32px', flex: 1 }}>
+              <h4 style={{ marginBottom: '24px', display: 'flex', alignItems: 'center', gap: '12px', fontSize: '1rem', fontWeight: 900, color: '#3b82f6' }}><Tag size={20} /> Precision Entity Wall</h4>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                {result.entities.length === 0 ? <p style={{ opacity: 0.3, fontSize: '0.9rem' }}>No technical objects captured.</p> :
+                 result.entities.map((e,i)=>(
+                  <div key={i} style={{ padding: '16px', background: 'rgba(255,255,255,0.015)', borderRadius: '16px', border: '1px solid rgba(255,255,255,0.04)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderLeft: `4px solid ${e.type==='AMOUNT' ? '#3b82f6' : '#a855f7'}` }}>
+                    <div>
+                      <div style={{ fontSize: '0.7rem', opacity: 0.4, fontWeight: 900, textTransform: 'uppercase', marginBottom: '4px' }}>{e.type}</div>
+                      <div style={{ fontSize: '1rem', fontWeight: 700 }}>{e.value}</div>
+                    </div>
+                    <TrendingUp size={16} opacity={0.3} />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <button onClick={()=>setMode('idle')} style={{ padding: '22px', borderRadius: '24px', background: '#3b82f6', color: 'white', border: 'none', fontWeight: 900, cursor: 'pointer', fontSize: '1.1rem', letterSpacing: '0.05em', boxShadow: '0 15px 30px -10px #3b82f6' }}>NEW STRATEGIC ANALYSIS</button>
+          </div>
+
+        </div>
+      )}
+
+      {/* Global CSS for McKinsey Black Theme */}
+      <style>{`
+        body { background: black !important; }
+        .glass-panel { background: rgba(255, 255, 255, 0.01); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 32px; }
+        .spin { animation: rotate 2s linear infinite; }
+        @keyframes rotate { 100% { transform: rotate(360deg); } }
+      `}</style>
+    </div>
+  );
+}

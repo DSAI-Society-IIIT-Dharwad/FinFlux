@@ -1,0 +1,24 @@
+training:
+  model_name: openai/whisper-small
+  output_dir: outputs/whisper-small-lora
+  # DO NOT PUT BATCH SIZE 8. The Python script forces batch size 2 to save your 8GB VRAM.
+  gradient_accumulation_steps: 8 # 2 (batch) x 8 (accum) = 16 effective batch size. Perfect.
+  num_train_epochs: 3
+  learning_rate: 1.0e-4
+  # lora_r increased to 16 for better financial jargon learning
+  lora_r: 16
+  lora_alpha: 32 # Always 2x the 'r' value
+  lora_dropout: 0.05
+  save_steps: 500
+  logging_steps: 25 # Prints loss every 25 steps so you know it's working
+  save_total_limit: 2
+  generation_max_length: 225
+  coverage:
+    min_total_rows: 5000  # Relaxed for faster iteration
+    min_rows_by_language:
+      en: 2000
+      hi: 100
+      hinglish: 100
+
+data:
+  train_csv: data/processed/combined_manifest.csv

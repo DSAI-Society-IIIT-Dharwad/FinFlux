@@ -1,0 +1,53 @@
+output_dir: data/processed
+
+datasets:
+
+  - name: spgispeech_subset_15h
+    dataset_id: kensho/spgispeech
+    config_name: L
+    split: train
+    audio_column: audio
+    text_column: transcript
+    expected_hours: 15
+    mix_ratio: 0.375
+    financial_only: false
+    # HACKATHON TIP: Bumping min_seconds to 3 removes useless short bursts/silence 
+    # that waste your RTX 4060 training time.
+    min_seconds: 3
+    max_seconds: 60
+
+  - name: earnings22_subset_12h
+    dataset_id: distil-whisper/earnings22
+    config_name: chunked
+    split: test
+    audio_column: audio
+    text_column: transcription
+    expected_hours: 12
+    mix_ratio: 0.300
+    financial_only: false
+    min_seconds: 3
+    max_seconds: 60
+
+  - name: librispeech_clean_subset_10h
+    dataset_id: openslr/librispeech_asr
+    config_name: clean
+    split: train.360
+    audio_column: audio
+    text_column: text
+    expected_hours: 10
+    mix_ratio: 0.200
+    financial_only: false
+    min_seconds: 3
+    max_seconds: 60
+
+  - name: librispeech_other_subset_3h
+    dataset_id: openslr/librispeech_asr
+    config_name: other
+    split: train.500
+    audio_column: audio
+    text_column: text
+    expected_hours: 3
+    mix_ratio: 0.125
+    financial_only: false
+    min_seconds: 3
+    max_seconds: 60

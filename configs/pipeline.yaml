@@ -1,0 +1,8 @@
+pipeline:
+  call_id: demo-call
+  audio_path: data/demo/sample.wav
+  asr_backend: fixture
+  transcript_fixture: I will pay INR 5000 EMI by 12/05
+  model_path: null
+  output_dir: data/runtime
+  export_replay: data/runtime/demo-replay.json
