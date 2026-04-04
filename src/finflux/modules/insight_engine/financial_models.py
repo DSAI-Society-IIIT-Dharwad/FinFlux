@@ -29,15 +29,15 @@ class ProductionExpertModule:
         print(f"[ProductionExpertModule] Initializing Modular Stack on device={self.device}...")
 
         # ── Stage 1: Precise Language Detection (XLM-Roberta) ──
-        self.lang_pipe = pipeline("text-classification", model=config.HF_LANG_DETECT, device=self.device, token=config.HF_TOKEN)
+        self.lang_pipe = pipeline("text-classification", model=config.HF_LANG_DETECT, device=self.device)
 
         # ── Stage 2: Topic & Advice Classification (DeBERTa v3) ──
-        self.topic_pipe = pipeline("zero-shot-classification", model=config.HF_ZERO_SHOT, device=self.device, token=config.HF_TOKEN)
+        self.topic_pipe = pipeline("zero-shot-classification", model=config.HF_ZERO_SHOT, device=self.device)
         self.topics = ["investment", "loan", "EMI", "insurance", "mutual fund", "gold", "stock", "crypto", "property", "general"]
         self.advice_labels = ["asking for financial advice", "general discussion"]
 
         # ── Stage 3: Financial Sentiment & Strategy (FinBERT) ──
-        self.fin_pipe = pipeline("sentiment-analysis", model=config.HF_FINBERT, device=self.device, token=config.HF_TOKEN)
+        self.fin_pipe = pipeline("sentiment-analysis", model=config.HF_FINBERT, device=self.device)
 
         # ── Stage 4: Zero-Shot Entity Extraction (GLiNER) ──
         if HAS_GLINER:
@@ -45,7 +45,7 @@ class ProductionExpertModule:
             self.gliner = GLiNER.from_pretrained(config.HF_NER_FINANCIAL).to("cuda" if self.device == 0 else "cpu")
         else:
             self.gliner = None
-            self.ner_fallback = pipeline("ner", model=config.HF_NER_GENERAL, aggregation_strategy="simple", device=self.device, token=config.HF_TOKEN)
+            self.ner_fallback = pipeline("ner", model=config.HF_NER_GENERAL, aggregation_strategy="simple", device=self.device)
 
         # Labels for GLiNER semantic extraction
         self.labels = [

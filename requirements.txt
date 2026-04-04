@@ -3,7 +3,7 @@ datasets
 peft
 accelerate
 bitsandbytes
-torch
+# torch 
 torchaudio
 soundfile
 pyyaml
