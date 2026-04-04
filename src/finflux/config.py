@@ -21,7 +21,52 @@ HF_NER_GENERAL        = None  # skip, wrong model
 HF_LANG_DETECT        = "papluca/xlm-roberta-base-language-detection" # Precise Lang Gating
 HF_INDIC_NER          = None  # skip, not downloaded
 HF_INDIC_STT          = None  # skip, not downloaded
+HF_LOCAL_ASR          = os.environ.get("HF_LOCAL_ASR", "openai/whisper-small")
 
 # ── CONFIG ────────────────────────────────────────
 USE_CUDA              = os.environ.get("USE_CUDA", "true").lower() == "true"
 DEBUG_MODE            = os.environ.get("DEBUG_MODE", "false").lower() == "true"
+
+# ── NLP TUNING ───────────────────────────────────
+FINANCIAL_TOPICS      = [
+	"loan",
+	"emi",
+	"sip",
+	"investment",
+	"mutual fund",
+	"insurance",
+	"tax",
+	"credit card",
+	"fixed deposit",
+	"retirement",
+	"property",
+	"gold",
+	"stock",
+	"crypto",
+	"general",
+]
+
+GLINER_LABELS         = [
+	"INVESTMENT",
+	"LOAN",
+	"EMI",
+	"INSURANCE",
+	"MUTUAL FUND",
+	"GOLD",
+	"STOCK",
+	"PROPERTY",
+	"AMOUNT",
+	"INTEREST RATE",
+	"TENURE",
+	"BANK",
+	"FINANCIAL GOAL",
+	"INCOME",
+	"EXPENSE",
+	"PERSON",
+	"ORGANIZATION",
+	"LOCATION",
+]
+
+RISK_KEYWORDS_HIGH    = ["default", "overdue", "late fee", "penalty", "collection", "cannot pay", "missed emi"]
+RISK_KEYWORDS_MEDIUM  = ["loan", "emi", "credit card", "interest", "debt", "liability"]
+RISK_KEYWORDS_LOW     = ["sip", "investment", "insurance", "savings", "diversify", "goal"]

@@ -5,6 +5,7 @@ import uuid
 import time
 import json
 import datetime
+import subprocess
 import requests
 from typing import Any, Dict
 from pathlib import Path
@@ -100,6 +101,48 @@ def _supabase_get_user(access_token: str) -> Dict[str, Any]:
     return data
 
 
+def _prepare_audio_for_asr(raw_audio: bytes, call_id: str, original_filename: str | None) -> tuple[str, str | None]:
+    """Write upload to disk and convert to 16k mono WAV for ASR compatibility."""
+    suffix = Path(original_filename or "").suffix.lower()
+    if not suffix or len(suffix) > 10:
+        suffix = ".bin"
+
+    temp_input = f"tmp_{call_id}_src{suffix}"
+    temp_wav = f"tmp_{call_id}.wav"
+
+    with open(temp_input, "wb") as f:
+        f.write(raw_audio)
+
+    # If client already uploaded WAV, use it directly and avoid unnecessary transcoding.
+    if suffix == ".wav":
+        return temp_input, temp_input
+
+    ffmpeg_exe = None
+    try:
+        import imageio_ffmpeg  # type: ignore
+
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        ffmpeg_exe = None
+
+    if ffmpeg_exe:
+        try:
+            subprocess.run(
+                [ffmpeg_exe, "-y", "-i", temp_input, "-ar", "16000", "-ac", "1", temp_wav],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return temp_wav, temp_input
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Audio conversion failed: {e}")
+
+    raise HTTPException(
+        status_code=422,
+        detail="Uploaded audio requires ffmpeg conversion. Upload WAV or install ffmpeg support.",
+    )
+
+
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
     user = _supabase_get_user(credentials.credentials)
     return str(user.get("id"))
@@ -144,6 +187,26 @@ def _build_analysis_result(
     injection_found = SECURITY.detect_injection(clean_text)
     exec_summary = analysis.get("executive_summary", "")
     safe_summary = SECURITY.mask_pii(exec_summary)
+    analysis_risk = str(analysis.get("risk_level", "")).upper()
+    nlp_risk = str(nlp_res.get("risk_level", "LOW")).upper()
+    resolved_risk = analysis_risk if analysis_risk in {"LOW", "MEDIUM", "HIGH", "CRITICAL"} else nlp_risk
+    model_attr = {
+        **nlp_res.get("model_attribution", {}),
+        "qwen": {
+            "reasoning_available": bool(analysis.get("expert_reasoning_points", "").strip()),
+            "section": "Wall of Logic",
+        },
+    }
+    if "nlp" not in model_attr:
+        model_attr["nlp"] = {
+            "topic_top3": nlp_res.get("topic_top3", []),
+            "sentiment_breakdown": nlp_res.get("sentiment_breakdown", {}),
+            "financial_parameters": nlp_res.get("financial_parameters", {}),
+            "recommendation_hints": nlp_res.get("recommendation_hints", []),
+            "language_mix": nlp_res.get("language_mix", {}),
+            "risk_score": nlp_res.get("risk_score", 0.0),
+            "risk_reasons": nlp_res.get("risk_reasons", []),
+        }
 
     return {
         "conversation_id": f"call_{uuid.uuid4().hex[:8]}",
@@ -154,15 +217,18 @@ def _build_analysis_result(
         "timestamp": str(datetime.datetime.utcnow()),
         "language": nlp_res.get("detected_language", "unknown"),
         "language_confidence": nlp_res.get("language_confidence", 0.0),
+        "language_mix": nlp_res.get("language_mix", {}),
         "financial_topic": nlp_res.get("topic", "N/A"),
         "topic_top3": nlp_res.get("topic_top3", []),
         "strategic_intent": analysis.get("strategic_intent", ""),
-        "risk_level": analysis.get("risk_level", "LOW"),
+        "risk_level": resolved_risk,
         "financial_sentiment": nlp_res.get("financial_sentiment", "Neutral"),
         "sentiment_breakdown": nlp_res.get("sentiment_breakdown", {}),
         "advice_request": nlp_res.get("is_advice_request", False) or SECURITY.is_asking_for_advice(clean_text),
         "injection_attempt": injection_found,
         "entities": nlp_res.get("entities", []),
+        "financial_parameters": nlp_res.get("financial_parameters", {}),
+        "recommendation_hints": nlp_res.get("recommendation_hints", []),
         "executive_summary": safe_summary,
         "summary": safe_summary,
         "future_gearing": analysis.get("future_gearing", ""),
@@ -172,13 +238,7 @@ def _build_analysis_result(
         "transcript": clean_text,
         "expert_reasoning_points": analysis.get("expert_reasoning_points", ""),
         "expert_reasoning": analysis.get("expert_reasoning_points", ""),
-        "model_attribution": {
-            **nlp_res.get("model_attribution", {}),
-            "qwen": {
-                "reasoning_available": bool(analysis.get("expert_reasoning_points", "").strip()),
-                "section": "Wall of Logic",
-            },
-        },
+        "model_attribution": model_attr,
         "confidence_score": nlp_res.get("confidence_score", 0.0),
         "timing": {
             "asr_s": round(t_asr, 2),
@@ -274,9 +334,8 @@ async def analyze_audio(
     encrypted_audio = SECURITY.encrypt_audio(raw_audio)
     with open(STORAGE_DIR / f"{call_id}.enc", "wb") as f: f.write(encrypted_audio)
 
-    # Temporary decrypted file for ASR
-    temp_wav = f"tmp_{call_id}.wav"
-    with open(temp_wav, "wb") as f: f.write(raw_audio)
+    # Temporary decoded WAV for ASR plus original upload copy for conversion.
+    temp_wav, temp_input = _prepare_audio_for_asr(raw_audio, call_id, file.filename)
 
     try:
         # ── Stage 1: Local-Cloud Hybrid ASR (Groq-Whisper with Local Fallback) ──
@@ -288,8 +347,19 @@ async def analyze_audio(
             print(f"[API] Groq ASR Failed: {e}. Switching to Local Fallback...")
             local_text = EXPERT.transcribe_local(temp_wav)
             asr = {"text": local_text, "language": "hindi" if local_text else "unknown"}
+
+        cloud_error = str(asr.get("error", "")).strip()
+        if cloud_error:
+            print(f"[API] Cloud ASR error: {cloud_error}")
             
-        raw_text = asr.get("text", "")
+        raw_text = str(asr.get("text", "")).strip()
+        if not raw_text:
+            print("[API] Empty cloud transcript. Trying local ASR fallback...")
+            local_text = str(EXPERT.transcribe_local(temp_wav) or "").strip()
+            if local_text:
+                raw_text = local_text
+            else:
+                raise HTTPException(status_code=422, detail="Could not transcribe audio. Please retry with clearer audio.")
         t_asr = time.time() - t_start
 
         # ── Stage 2: Normalization (Llama 8B) ──
@@ -312,11 +382,15 @@ async def analyze_audio(
         save_conversation(result)
         return result
 
+    except HTTPException:
+        # Preserve explicit API errors (e.g., 400/422) instead of masking as 500.
+        raise
     except Exception as e:
         print(f"[Server] Pipeline crash: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(temp_wav): os.remove(temp_wav)
+        if temp_input and os.path.exists(temp_input): os.remove(temp_input)
 
 @app.get("/api/warm")
 def warm_models():
@@ -463,7 +537,7 @@ def generate_report(conversation_id: str, format: str = "pdf", current_user: str
     from reportlab.lib.pagesizes import LETTER
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, HRFlowable
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
     from reportlab.lib.units import inch
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
@@ -486,7 +560,6 @@ def generate_report(conversation_id: str, format: str = "pdf", current_user: str
     header_style = ParagraphStyle('HeaderStyle', parent=styles['Heading2'], fontSize=14, textColor=colors.HexColor("#1e40af"), spaceBefore=18, spaceAfter=8, fontName=f"{font_name}-Bold" if font_name == "Helvetica" else font_name, borderLeftIndent=12, leftIndent=12)
     body_style = ParagraphStyle('BodyStyle', parent=styles['BodyText'], fontSize=11, leading=16, spaceAfter=12, fontName=font_name)
     meta_style = ParagraphStyle('MetaStyle', parent=styles['BodyText'], fontSize=9, textColor=colors.grey, fontName=font_name)
-    transcript_style = ParagraphStyle('TranscriptStyle', parent=styles['BodyText'], fontSize=9, leading=14, textColor=colors.darkslategrey, leftIndent=12, fontName=font_name)
 
     story = []
 
@@ -558,15 +631,6 @@ def generate_report(conversation_id: str, format: str = "pdf", current_user: str
             if line.strip():
                 clean_line = line.replace('• ', '').replace('**', '')
                 story.append(Paragraph(f"• {clean_line}", body_style))
-    
-    # 7. Transcript (New Page)
-    story.append(PageBreak())
-    story.append(Paragraph("VERIFIED TRANSCRIPT RECORD", header_style))
-    transcript = data.get("transcript", "")
-    for part in transcript.split('\n\n'):
-        if part.strip():
-            story.append(Paragraph(part, transcript_style))
-            story.append(Spacer(1, 0.1*inch))
 
     doc.build(story)
     buffer.seek(0)

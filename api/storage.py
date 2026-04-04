@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import bcrypt
-from typing import Any, Dict, Optional
 import requests
 from typing import Any, Dict, List, Optional
 
@@ -41,7 +40,7 @@ def _supabase_headers() -> Dict[str, str]:
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
         "Content-Type": "application/json",
-        "Prefer": "return=representation",
+        "Prefer": "return=representation,resolution=merge-duplicates",
     }
 
 
@@ -157,6 +156,7 @@ class ConversationLog(Base):
     entities = Column(Text) # JSON List
     key_points = Column(Text) # JSON List
     timing_data = Column(Text) # JSON Dict
+    nlp_payload_data = Column(Text) # JSON Dict
     chat_thread_id = Column(String, index=True)
     input_mode = Column(String) # text|audio
     raw_user_input = Column(Text)
@@ -202,6 +202,7 @@ def _run_schema_migrations():
     _ensure_sqlite_column("conversations", "chat_thread_id", "TEXT")
     _ensure_sqlite_column("conversations", "input_mode", "TEXT")
     _ensure_sqlite_column("conversations", "raw_user_input", "TEXT")
+    _ensure_sqlite_column("conversations", "nlp_payload_data", "TEXT")
 
 
 _run_schema_migrations()
@@ -252,18 +253,43 @@ def _supabase_insert_conversation(data: Dict[str, Any]) -> None:
     conversation_id = str(data.get("conversation_id", ""))
     ts = str(data.get("timestamp") or datetime.datetime.utcnow().isoformat())
 
-    # Upsert thread with explicit user filter guard fields.
-    _supabase_request(
-        "POST",
+    thread_payload = {
+        "id": thread_id,
+        "user_id": user_id,
+        "title": str(data.get("financial_topic", "Financial Discussion"))[:180],
+        "last_message_at": ts,
+    }
+    # Continue existing thread when present; only insert when missing.
+    thread_rows = _supabase_request(
+        "GET",
         f"/rest/v1/{SUPABASE_CONV_THREADS_TABLE}",
-        payload={
-            "id": thread_id,
-            "user_id": user_id,
-            "title": str(data.get("financial_topic", "Financial Discussion"))[:180],
-            "last_message_at": ts,
+        params={
+            "select": "id,user_id",
+            "id": f"eq.{thread_id}",
+            "user_id": f"eq.{user_id}",
+            "limit": 1,
         },
-        params={"on_conflict": "id", "columns": "id,user_id,title,last_message_at"},
-    )
+    ) or []
+    if thread_rows:
+        _supabase_request(
+            "PATCH",
+            f"/rest/v1/{SUPABASE_CONV_THREADS_TABLE}",
+            payload={
+                "title": thread_payload["title"],
+                "last_message_at": thread_payload["last_message_at"],
+            },
+            params={
+                "id": f"eq.{thread_id}",
+                "user_id": f"eq.{user_id}",
+            },
+        )
+    else:
+        _supabase_request(
+            "POST",
+            f"/rest/v1/{SUPABASE_CONV_THREADS_TABLE}",
+            payload=thread_payload,
+            params={"on_conflict": "id", "columns": "id,user_id,title,last_message_at"},
+        )
 
     sequence_rows = _supabase_request(
         "GET",
@@ -353,6 +379,15 @@ def save_conversation(data):
 
     db = SessionLocal()
     user_id = data.get("user_id", "default_guest")
+    nlp_payload = {
+        "topic_top3": data.get("topic_top3", []),
+        "sentiment_breakdown": data.get("sentiment_breakdown", {}),
+        "financial_parameters": data.get("financial_parameters", {}),
+        "recommendation_hints": data.get("recommendation_hints", []),
+        "language_mix": data.get("language_mix", {}),
+        "model_attribution": data.get("model_attribution", {}),
+        "language_confidence": data.get("language_confidence", 0.0),
+    }
     try:
         log = ConversationLog(
             id=data["conversation_id"],
@@ -374,6 +409,7 @@ def save_conversation(data):
             entities=json.dumps(data.get("entities", [])),
             key_points=json.dumps(data.get("key_points", [])),
             timing_data=json.dumps(data.get("timing", {})),
+            nlp_payload_data=json.dumps(nlp_payload),
             chat_thread_id=data.get("chat_thread_id", data.get("conversation_id")),
             input_mode=data.get("input_mode", "text"),
             raw_user_input=data.get("raw_user_input", data.get("transcript", "")),
@@ -400,14 +436,19 @@ def search_memories(user_id: str, query_text: str, filters: Optional[Dict[str, A
         return {"results": [], "error": str(e)}
 
 def _map_bridge_message_to_conversation(row: Dict[str, Any]) -> Dict[str, Any]:
+    model_attr = row.get("model_attribution") if isinstance(row.get("model_attribution"), dict) else {}
+    nlp_meta = model_attr.get("nlp", {}) if isinstance(model_attr, dict) else {}
     return {
         "conversation_id": row.get("conversation_id") or row.get("id"),
         "user_id": row.get("user_id", ""),
         "timestamp": row.get("created_at", ""),
         "language": row.get("language", "unknown"),
+        "language_mix": nlp_meta.get("language_mix", {}),
         "financial_topic": row.get("financial_topic", "N/A"),
+        "topic_top3": nlp_meta.get("topic_top3", []),
         "risk_level": row.get("risk_level", "LOW"),
         "financial_sentiment": row.get("financial_sentiment", "Neutral"),
+        "sentiment_breakdown": nlp_meta.get("sentiment_breakdown", {}),
         "executive_summary": row.get("executive_summary", ""),
         "summary": row.get("executive_summary", ""),
         "future_gearing": row.get("future_gearing", ""),
@@ -418,8 +459,11 @@ def _map_bridge_message_to_conversation(row: Dict[str, Any]) -> Dict[str, Any]:
         "transcript": row.get("transcript", ""),
         "confidence_score": row.get("confidence_score", 0.0),
         "entities": row.get("entities") or [],
+        "financial_parameters": nlp_meta.get("financial_parameters", {}),
+        "recommendation_hints": nlp_meta.get("recommendation_hints", []),
         "key_points": [],
         "timing": row.get("timing") or {},
+        "model_attribution": model_attr,
         "chat_thread_id": row.get("thread_id") or row.get("conversation_id") or row.get("id"),
         "input_mode": row.get("input_mode") or "text",
         "raw_user_input": row.get("raw_user_input") or row.get("transcript") or "",
@@ -453,14 +497,20 @@ def get_conversation_by_id(user_id: str, conversation_id: str) -> Optional[Dict[
         ).first()
         if not r:
             return None
+        nlp_payload = _json_loads_safe(r.nlp_payload_data, "{}")
+        nlp_model_attr = nlp_payload.get("model_attribution", {}) if isinstance(nlp_payload, dict) else {}
         return {
             "conversation_id": r.id,
             "user_id": r.user_id,
             "timestamp": r.timestamp,
             "language": r.language,
+            "language_confidence": nlp_payload.get("language_confidence", 0.0) if isinstance(nlp_payload, dict) else 0.0,
+            "language_mix": nlp_payload.get("language_mix", {}) if isinstance(nlp_payload, dict) else {},
             "financial_topic": r.financial_topic,
+            "topic_top3": nlp_payload.get("topic_top3", []) if isinstance(nlp_payload, dict) else [],
             "risk_level": r.risk_level,
             "financial_sentiment": r.financial_sentiment,
+            "sentiment_breakdown": nlp_payload.get("sentiment_breakdown", {}) if isinstance(nlp_payload, dict) else {},
             "executive_summary": r.executive_summary,
             "summary": r.executive_summary,
             "future_gearing": r.future_gearing,
@@ -471,8 +521,11 @@ def get_conversation_by_id(user_id: str, conversation_id: str) -> Optional[Dict[
             "transcript": r.transcript,
             "confidence_score": r.confidence_score,
             "entities": _json_loads_safe(r.entities, "[]"),
+            "financial_parameters": nlp_payload.get("financial_parameters", {}) if isinstance(nlp_payload, dict) else {},
+            "recommendation_hints": nlp_payload.get("recommendation_hints", []) if isinstance(nlp_payload, dict) else [],
             "key_points": _json_loads_safe(r.key_points, "[]"),
             "timing": _json_loads_safe(r.timing_data, "{}"),
+            "model_attribution": nlp_model_attr if isinstance(nlp_model_attr, dict) else {},
             "chat_thread_id": r.chat_thread_id or r.id,
             "input_mode": r.input_mode or "text",
             "raw_user_input": r.raw_user_input or r.transcript,
@@ -593,14 +646,20 @@ def get_all_conversations(user_id: str = "guest_001"):
         ).order_by(ConversationLog.timestamp.desc()).all()
         res = []
         for r in rows:
+            nlp_payload = _json_loads_safe(r.nlp_payload_data, "{}")
+            nlp_model_attr = nlp_payload.get("model_attribution", {}) if isinstance(nlp_payload, dict) else {}
             res.append({
                 "conversation_id": r.id,
                 "user_id": r.user_id,
                 "timestamp": r.timestamp,
                 "language": r.language,
+                "language_confidence": nlp_payload.get("language_confidence", 0.0) if isinstance(nlp_payload, dict) else 0.0,
+                "language_mix": nlp_payload.get("language_mix", {}) if isinstance(nlp_payload, dict) else {},
                 "financial_topic": r.financial_topic,
+                "topic_top3": nlp_payload.get("topic_top3", []) if isinstance(nlp_payload, dict) else [],
                 "risk_level": r.risk_level,
                 "financial_sentiment": r.financial_sentiment,
+                "sentiment_breakdown": nlp_payload.get("sentiment_breakdown", {}) if isinstance(nlp_payload, dict) else {},
                 "executive_summary": r.executive_summary,
                 "summary": r.executive_summary,
                 "future_gearing": r.future_gearing,
@@ -613,8 +672,11 @@ def get_all_conversations(user_id: str = "guest_001"):
                 "injection_attempt": r.injection_attempt,
                 "confidence_score": r.confidence_score,
                 "entities": _json_loads_safe(r.entities, "[]"),
+                "financial_parameters": nlp_payload.get("financial_parameters", {}) if isinstance(nlp_payload, dict) else {},
+                "recommendation_hints": nlp_payload.get("recommendation_hints", []) if isinstance(nlp_payload, dict) else [],
                 "key_points": _json_loads_safe(r.key_points, "[]"),
                 "timing": _json_loads_safe(r.timing_data, "{}"),
+                "model_attribution": nlp_model_attr if isinstance(nlp_model_attr, dict) else {},
                 "chat_thread_id": r.chat_thread_id or r.id,
                 "input_mode": r.input_mode or "text",
                 "raw_user_input": r.raw_user_input or r.transcript,

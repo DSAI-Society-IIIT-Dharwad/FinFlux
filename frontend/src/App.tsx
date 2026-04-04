@@ -6,6 +6,12 @@ type ViewMode = 'chat' | 'insights';
 interface TopicScore { topic: string; score: number }
 interface SentimentBreakdown { positive?: number; neutral?: number; negative?: number }
 interface Entity { type: string; value: string; confidence?: number }
+interface LanguageMix {
+  hindi_pct?: number;
+  english_pct?: number;
+  other_pct?: number;
+  dominant_language?: string;
+}
 interface AnalysisResult {
   conversation_id: string;
   chat_thread_id?: string;
@@ -21,6 +27,7 @@ interface AnalysisResult {
   risk_assessment?: string;
   expert_reasoning_points?: string;
   timing?: { total_s?: number };
+  language_mix?: LanguageMix;
   topic_top3?: TopicScore[];
   sentiment_breakdown?: SentimentBreakdown;
   entities: Entity[];
@@ -43,6 +50,17 @@ interface ThreadSummary {
 }
 
 const API_BASE = 'http://localhost:8000';
+
+function formatLanguageMix(mix?: LanguageMix): string {
+  if (!mix) return 'Language mix unavailable';
+  const hindi = Number(mix.hindi_pct || 0).toFixed(1);
+  const english = Number(mix.english_pct || 0).toFixed(1);
+  const other = Number(mix.other_pct || 0).toFixed(1);
+  if (Number(other) >= 0.5) {
+    return `Hindi ${hindi}% | English ${english}% | Other ${other}%`;
+  }
+  return `Hindi ${hindi}% | English ${english}%`;
+}
 
 function encodeWavBlob(samples: Float32Array, sr: number): Blob {
   const bps = 16;
@@ -621,6 +639,7 @@ function App() {
                         <div className="msg-metrics">
                           <span>Topic: {msg.attachedResult.financial_topic}</span>
                           <span>Risk: {msg.attachedResult.risk_level}</span>
+                          <span>Language Mix: {formatLanguageMix(msg.attachedResult.language_mix)}</span>
                           <span>Confidence: {Math.round((msg.attachedResult.confidence_score || 0) * 100)}%</span>
                           <button
                             className="details-toggle"
@@ -805,6 +824,7 @@ function App() {
                   <h4>{selectedInsightConversation.financial_topic}</h4>
                   <p><strong>Risk:</strong> {selectedInsightConversation.risk_level}</p>
                   <p><strong>Confidence:</strong> {Math.round((selectedInsightConversation.confidence_score || 0) * 100)}%</p>
+                  <p><strong>Language Mix:</strong> {formatLanguageMix(selectedInsightConversation.language_mix)}</p>
                   <p><strong>Summary:</strong> {selectedInsightConversation.executive_summary}</p>
                   <p><strong>Sentiment:</strong> {selectedInsightConversation.financial_sentiment || 'N/A'}</p>
                   <p><strong>Pipeline Latency:</strong> {(selectedInsightConversation.timing?.total_s || 0).toFixed(2)}s</p>
