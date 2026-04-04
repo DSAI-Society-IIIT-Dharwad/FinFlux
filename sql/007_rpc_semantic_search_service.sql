@@ -1,0 +1,51 @@
+-- Service-key RPC variant for server-side calls when auth.uid() is not available.
+-- Use only from trusted backend with service role key.
+
+drop function if exists public.search_user_message_embeddings_service(vector, text, integer, uuid);
+
+create or replace function public.search_user_message_embeddings_service(
+  query_embedding vector(384),
+  p_user_id text,
+  match_count int default 8,
+  filter_thread_id uuid default null
+)
+returns table (
+  message_id uuid,
+  thread_id uuid,
+  created_at timestamptz,
+  similarity float8,
+  payload jsonb
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    m.id as message_id,
+    m.thread_id,
+    m.created_at,
+    1 - (e.embedding <=> query_embedding) as similarity,
+    jsonb_build_object(
+      'executive_summary', to_jsonb(m)->>'executive_summary',
+      'transcript', to_jsonb(m)->>'transcript',
+      'financial_topic', coalesce(to_jsonb(m)->>'financial_topic', to_jsonb(m)->>'topic'),
+      'risk_level', to_jsonb(m)->>'risk_level',
+      'confidence_score', to_jsonb(m)->>'confidence_score',
+      'financial_sentiment', to_jsonb(m)->>'financial_sentiment',
+      'strategic_intent', to_jsonb(m)->>'strategic_intent',
+      'future_gearing', to_jsonb(m)->>'future_gearing',
+      'risk_assessment', to_jsonb(m)->>'risk_assessment'
+    ) as payload
+  from public.message_embeddings e
+  join public.conversation_messages m on m.id = e.message_id
+  where
+    e.user_id::text = p_user_id
+    and m.user_id::text = p_user_id
+    and (filter_thread_id is null or m.thread_id = filter_thread_id)
+  order by e.embedding <=> query_embedding
+  limit greatest(match_count, 1);
+$$;
+
+revoke all on function public.search_user_message_embeddings_service(vector(384), text, int, uuid) from public;
+grant execute on function public.search_user_message_embeddings_service(vector(384), text, int, uuid) to service_role;

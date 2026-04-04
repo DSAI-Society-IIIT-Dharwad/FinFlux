@@ -24,7 +24,6 @@ pydub
 <<<<<<< HEAD
 =======
 sqlalchemy
-chromadb
 sentence-transformers
 bcrypt
 python-dotenv

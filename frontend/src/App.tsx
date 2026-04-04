@@ -255,6 +255,12 @@ function App() {
         throw new Error(err.detail || 'Auth failed');
       }
       const data = await res.json();
+      if (!data.access_token) {
+        setAuthError(data.message || 'Signup successful. Please verify your email, then sign in.');
+        setAuthMode('signin');
+        setAuthPass('');
+        return;
+      }
       setToken(data.access_token);
       setUsername(data.username);
       setAuthPass('');
@@ -264,6 +270,13 @@ function App() {
       setAuthError(String(e));
     } finally {
       setAuthLoading(false);
+    }
+  };
+
+  const handleAuthKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void handleAuth();
     }
   };
 
@@ -527,8 +540,19 @@ function App() {
           <h1>{authMode === 'signin' ? 'Sign In' : 'Create Account'}</h1>
           <p>Secure financial intelligence workspace</p>
 
-          <input placeholder="Username" value={authUser} onChange={(e) => setAuthUser(e.target.value)} />
-          <input type="password" placeholder="Password" value={authPass} onChange={(e) => setAuthPass(e.target.value)} />
+          <input
+            placeholder="Email"
+            value={authUser}
+            onChange={(e) => setAuthUser(e.target.value)}
+            onKeyDown={handleAuthKeyDown}
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={authPass}
+            onChange={(e) => setAuthPass(e.target.value)}
+            onKeyDown={handleAuthKeyDown}
+          />
 
           {authError && <div className="auth-error">{authError}</div>}
 
