@@ -18,6 +18,7 @@ class GroqWhisperAdapter:
             return {"error": "GROQ_API_KEY not set", "text": ""}
 
         # Check file size before sending — Groq limit is 25MB
+        import os
         file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
         if file_size_mb > 24:
             print(f"[GroqWhisper] File too large ({file_size_mb:.1f}MB), switching to local fallback")
@@ -64,7 +65,7 @@ class ExpertSynthesisEngine:
             "temperature": 0.1,
         }
         
-        # Remove response_format for non-JSON calls
+        # Remove response_format for non-JSON calls — don't pass None
         if "JSON" in system_prompt or "json" in system_prompt.lower():
             payload["response_format"] = {"type": "json_object"}
 
@@ -84,7 +85,7 @@ class ExpertSynthesisEngine:
 
     def _get_demo_response(self, system_prompt: str) -> str:
         """Convincing McKinsey-style fixture data."""
-        if "STRATEGIC JSON" in system_prompt or "valid JSON" in system_prompt:
+        if "STRATEGIC JSON" in system_prompt:
             return json.dumps({
                 "executive_summary": "The client is seeking to optimize their diversified investment portfolio with a focus on long-term capital appreciation and risk mitigation. Their current posture indicates a strong preference for secure assets while maintaining exposure to emerging opportunities.",
                 "key_insights": ["High-yield fixed income remains the primary liquidity driver.", "Strategic reallocation into low-volatility equity indexes is recommended.", "Current EMI obligations are well-covered by operational cash flow."],
@@ -100,23 +101,22 @@ class ExpertSynthesisEngine:
 
     def normalize_transcript(self, transcript: str) -> str:
         """Stage 2: Transcript Normalization (Llama-3-8B Fast)."""
-        transcript = transcript[:1500]
-        sys_p = """You are an expert multilingual ASR correction specialist for Indian financial conversations.
+        sys_p = """You are an expert multilingual transcript editor specializing in Indian financial conversations.
 
-TASK: Fix ASR errors. Return ONLY corrected transcript — no commentary.
+TASK: Clean and format the raw ASR transcript.
 
-COMMON ASR ERRORS TO FIX:
-- "पांच जाल" / "paanch jaal" → ₹5,000
-- "एक लाख" → ₹1,00,000
-- "पांच साल" / "five jal" → 5 साल (5 years)
-- "sip" / "सिप" / "ship" → SIP
-- "ee em ai" / "ईएमआई" → EMI
-- "mutchual" / "म्यूचुअल फंड" → Mutual Fund
-- "sibil" / "civil score" → CIBIL score
-- Garbage syllable runs like "विच फील्ड शूअर आइए" → reconstruct from financial context, tag as [reconstructed]
-- Preserve ALL financial figures exactly
+RULES:
+1. Fix ASR spelling errors and grammar while preserving EXACT meaning
+2. Preserve all Hindi, Hinglish, and English words exactly as spoken — do NOT translate
+3. Add paragraph breaks every 3-4 sentences for readability
+4. If multiple speakers are detectable, prefix with "Speaker 1:" / "Speaker 2:"
+5. Preserve financial terms exactly: EMI, SIP, CIBIL, FD, NPS, etc.
+6. Do NOT add any commentary or explanation
+7. Return ONLY the cleaned, formatted transcript text
 
-OUTPUT: corrected transcript text only."""
+EXAMPLE INPUT: "mera home loan ka emi bahut zyada ho gaya hai soch raha hoon prepayment kar doon ya nahi aur sip bhi band karna pad sakta hai"
+EXAMPLE OUTPUT: "Mera home loan ka EMI bahut zyada ho gaya hai. Soch raha hoon prepayment kar doon ya nahi.Aur SIP bhi band karna pad sakta hai."
+"""
         try:
             result = self._call_groq(sys_p, transcript, model_override=self.fast_model)
             return result if result.strip() else transcript
@@ -135,12 +135,14 @@ OUTPUT: corrected transcript text only."""
         }
         try:
             cleaned = text.strip()
+            # Handle markdown code blocks if LLM adds them
             if "```json" in cleaned:
                 cleaned = cleaned.split("```json")[-1].split("```")[0].strip()
             elif "```" in cleaned:
                 cleaned = cleaned.split("```")[-1].split("```")[0].strip()
             
             data = json.loads(cleaned)
+            # Ensure all fields exist
             for field, val in default_analysis.items():
                 if field not in data: data[field] = val
             return data
@@ -148,60 +150,71 @@ OUTPUT: corrected transcript text only."""
             print(f"[GroqExpert] JSON Parse Guard Triggered: {e}")
             return default_analysis
 
-    def analyze(self, transcript: str, entities: List[Dict[str, Any]] = None, fin_sentiment: str = "Neutral", memory_context: str = "") -> Dict[str, Any]:
-        """Stage 7: Context-Aware Strategic Intelligence & Wall Architecture (Llama-70B + Qwen-32B)."""
-        transcript = transcript[:2500]
-        entities = (entities or [])[:20]
-        ent_text = json.dumps(entities, indent=2)
+    def analyze(self, transcript: str, entities: List[Dict[str, Any]] = None, fin_sentiment: str = "Neutral") -> Dict[str, Any]:
+        """Stage 7: World-Class Strategic Synthesis & Expert Reasoning (Llama-70B + Qwen-32B)."""
+        ent_text = json.dumps(entities or [], indent=2)
         
-        # ─── Part 1: Expert Technical Reasoning (CFA Intelligence Layer) ───
-        reason_p = f"PAST FINANCIAL CONTEXT:\n{memory_context}\n\nCURRENT TRANSCRIPT:\n{transcript}\nENTITIES: {ent_text}\nSENTIMENT: {fin_sentiment}"
-        reason_sys = """You are a Senior CFA-certified Financial Analyst (20 years Indian experience). 
-Act as the 'Intelligence Layer' to provide a Context-Aware Multi-Wall Technical Audit.
+        # ─── Part 1: Expert Technical Reasoning (Qwen) ───
+        reason_p = f"Transcript: {transcript}\nEntities: {ent_text}\nSentiment: {fin_sentiment}"
+        reason_sys = """You are a Senior Financial Analyst (CFA Level 3, 15 years experience in Indian markets).
 
-SILENT AUDIT LOGIC:
-1. Review 'PAST FINANCIAL CONTEXT' if available. Acknowledge previous SIP goals or debt concerns.
-2. Net Surplus: Determine [Income - Expenses = Surplus].
-3. Capacity Check: If Investment > Surplus, highlight "SIP Limit".
-4. Safety: Priority #1 is Emergency Buffer = 3 x Monthly Expenses.
+Analyze this financial conversation and provide STRUCTURED TECHNICAL REASONING.
 
-OUTPUT FORMAT (Multi-Wall Hierarchy):
-- **STRATEGIC WALL [Action Title]**: [3-5 sentences. Reference figures. Calculate savings rate % and CAGR corpus. Acknowledge past context if relevant.]
-- **TECHNICAL WALL [Action Title]**: [3-5 sentences. Apply 3-Tier Asset Mapping (Foundation/Growth/Alpha). Address risk types: Liquidity, Inflation, Concentration.]
-- **COMPLIANCE WALL [Action Title]**: [3-5 sentences. Evaluate lock-ins and flexibility. Identify the next critical decision.]
+OUTPUT FORMAT — return exactly 4 bullet points, each on a new line starting with "•":
+
+- **[TOPIC LABEL]**: [2-3 sentences of technical analysis. Be specific, cite exact figures mentioned.]
+- **[TOPIC LABEL]**: [2-3 sentences. Focus on financial mechanics and implications.]
+- **[TOPIC LABEL]**: [2-3 sentences. Address risk dimensions relevant to the conversation.]
+- **[TOPIC LABEL]**: [2-3 sentences. Address future positioning or decision framework.]
 
 RULES:
-1. Every sentence must reference specific transcript data.
-2. Normalized Informality: Transform slang into McKinsey executive logic.
-3. Each bullet minimum 4 sentences. NO LATEX."""
+- NO financial advice. Observations and technical analysis only.
+- Reference specific numbers, products, or terms from the transcript
+- Use professional financial terminology (liquidity, leverage, tenor, yield, etc.)
+- Each bullet must be self-contained and substantive
+- If Hindi/Hinglish terms are used, acknowledge them with English translation in brackets
 
+TOPIC LABELS to choose from based on content:
+Debt Servicing Analysis | Investment Strategy | Risk Profile | Liquidity Assessment | 
+Asset Allocation | Tax Efficiency | Insurance Coverage | Credit Utilization | 
+Portfolio Concentration | Cash Flow Management | Commitment Tracking | Market Exposure"""
         try:
             expert_reasoning = self._call_groq(reason_sys, reason_p, model_override=self.reason_model)
         except:
-            expert_reasoning = "- **STRATEGIC WALL**: Technical intelligence layer initialization failed. Contextual mapping disabled."
+            expert_reasoning = "- Analysis engine is currently using local reasoning patterns.\n- Technical extraction continues on cached parameters."
 
         # ─── Part 2: McKinsey-Style Final Synthesis (Llama-70B) ───
-        final_sys = """You are Head of Strategic Intelligence at a top Indian wealth management firm. 
-Produce a McKinsey-quality isolated JSON report. This result must be CONTEXT-AWARE.
+        final_sys = """You are a Senior Financial Intelligence Analyst producing a STRUCTURED STRATEGIC REPORT.
 
-Return ONLY valid JSON matching this exact schema:
+Generate a comprehensive financial intelligence JSON. This is NOT financial advice — it is structured intelligence extraction.
+
+STRICT JSON SCHEMA (return ONLY valid JSON, no text outside):
 {
-  "executive_summary": "4 sentences minimum. S1: primary activity. S2: specific figures. S3: Asset mapping Tier 1/2/3. S4: Follow-up on past context (from PAST FINANCIAL CONTEXT if provided).",
+  "executive_summary": "3-4 sentences. Opening sentence states the primary financial activity. Second sentence identifies key entities (amounts, products, timelines). Third sentence notes the risk dimension. Fourth sentence on strategic positioning.",
+  
   "key_insights": [
-    "Commitment: [Exploratory vs Decision] — reference specific code language",
-    "Asset Mix: Tier 1/2/3 mapping observations",
-    "Long-term Memory: Acknowledge a specific point from past sessions",
-    "Risk Quantification: Specific risk indicator with figures"
+    "Insight 1: Specific observation about a financial commitment or pattern mentioned",
+    "Insight 2: Observation about risk exposure or vulnerability",  
+    "Insight 3: Observation about financial behavior or decision-making pattern",
+    "Insight 4: Observation about future financial trajectory based on conversation"
   ],
-  "risk_assessment": "3 sentences. S1: risk level + driver. S2: % Income Committed. S3: emergency buffer priority.",
-  "future_gearing": "2-3 sentences. Future decision trajectory based on current surplus and history.",
-  "strategic_intent": "One of: [Growth | Consolidation | Debt Management | Risk Mitigation | Wealth Preservation | Liquidity Building | Learning/Research].",
+  
+  "risk_assessment": "2-3 sentences. State risk level clearly (LOW/MEDIUM/HIGH/CRITICAL). Explain the specific factors driving this level. Note any mitigating factors.",
+  
+  "future_gearing": "2-3 sentences. What financial considerations will be relevant for this person going forward based on what was discussed. Frame as contextual observations, not advice.",
+  
+  "strategic_intent": "1-2 sentences. Classify the primary intent: [Growth | Consolidation | Debt Management | Risk Mitigation | Wealth Preservation | Liquidity Building | Learning/Research]. Explain why.",
+  
   "risk_level": "LOW or MEDIUM or HIGH or CRITICAL"
 }
 
-NEVER WRITE: 'the customer discussed', 'this conversation covers', 'it is important to note'."""
-
-        final_user = f"PAST CONTEXT:\n{memory_context}\n\nCURRENT TRANSCRIPT:\n{transcript}\nENTITIES: {ent_text}\nANALYST NOTES: {expert_reasoning}"
+QUALITY STANDARDS:
+- executive_summary must be minimum 80 words
+- Each key_insight must reference something SPECIFICALLY mentioned in the transcript
+- Never use generic filler phrases like "the customer discussed" or "the conversation covered"
+- Use precise financial language
+- If the conversation is in Hindi/Hinglish, the insights should still be in English but reference the Hindi terms used"""
+        final_user = f"TRANSCRIPT: {transcript}\nVERIFIED ENTITIES: {ent_text}\nEXPERT ANALYST NOTES: {expert_reasoning}"
         
         raw_response = self._call_groq(final_sys, final_user, model_override=self.main_model)
         analysis_json = self._safe_json_parse(raw_response)

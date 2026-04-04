@@ -1,44 +1,19 @@
 import { useState, useRef, useCallback } from 'react';
 import { Mic, Square, Loader2, Tag, ShieldAlert, Sparkles, TrendingUp, ShieldCheck, Download, Edit2, Save, FileText, CheckCircle } from 'lucide-react';
 
-<<<<<<< HEAD
 interface Entity { type: string; value: string; context: string }
-=======
-interface Entity { type: string; value: string; context: string; confidence?: number }
-interface TopicScore { topic: string; score: number }
-interface SentimentBreakdown { positive?: number; neutral?: number; negative?: number }
-interface ModelAttribution {
-  xlm_roberta?: { detected_language?: string; confidence?: number };
-  deberta?: { top_topic?: string; top3_topics?: TopicScore[] };
-  finbert?: { label?: string; breakdown?: SentimentBreakdown };
-  gliner?: { entity_count?: number };
-  qwen?: { reasoning_available?: boolean; section?: string };
-}
-interface TimingData { total_s?: number; asr_s?: number; normalization_s?: number; expert_nlp_s?: number; synthesis_s?: number }
->>>>>>> upstream/main
 interface AnalysisResult {
   conversation_id: string; timestamp: string; language: string;
   financial_topic: string; risk_level: string;
   advice_request: boolean; injection_attempt: boolean;
   entities: Entity[]; executive_summary: string; key_insights: string[];
-<<<<<<< HEAD
   confidence_score: number; timing: any;
-=======
-  confidence_score: number; timing: TimingData;
->>>>>>> upstream/main
   financial_sentiment: string;
   expert_reasoning_points: string;
   future_gearing: string;
   strategic_intent: string;
   risk_assessment: string;
   transcript: string;
-<<<<<<< HEAD
-=======
-  language_confidence?: number;
-  topic_top3?: TopicScore[];
-  sentiment_breakdown?: SentimentBreakdown;
-  model_attribution?: ModelAttribution;
->>>>>>> upstream/main
 }
 
 function encodeWavBlob(samples: Float32Array, sr: number): Blob {
@@ -138,14 +113,7 @@ export default function RecordView() {
     const wav = new File([encodeWavBlob(merged, 16000)], 'rec.wav', { type: 'audio/wav' });
     setMode('processing');
     
-<<<<<<< HEAD
     const fd = new FormData(); fd.append('file', wav);
-=======
-    const fd = new FormData(); 
-    fd.append('file', wav);
-    fd.append('user_id', 'guest_001'); // Mandatory tenant tag
-
->>>>>>> upstream/main
     try {
         const res = await fetch('http://localhost:8000/api/analyze', { method: 'POST', body: fd });
         if(res.ok) { setResult(await res.json()); setMode('done'); } 
@@ -161,12 +129,6 @@ export default function RecordView() {
   };
 
   const rc = (l: string) => l === 'CRITICAL' ? '#ef4444' : l === 'HIGH' ? '#f97316' : l === 'MEDIUM' ? '#f59e0b' : '#10b981';
-<<<<<<< HEAD
-=======
-  const pct = (value?: number) => `${Math.max(0, Math.min(100, Math.round((value ?? 0) * 100)))}%`;
-  const safeTopics = (result?.model_attribution?.deberta?.top3_topics || result?.topic_top3 || []);
-  const sentiment = result?.model_attribution?.finbert?.breakdown || result?.sentiment_breakdown || {};
->>>>>>> upstream/main
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '32px', maxWidth: '1200px', margin: '0 auto', color: '#f8fafc' }}>
@@ -277,7 +239,6 @@ export default function RecordView() {
                   </div>
               </div>
 
-<<<<<<< HEAD
               {/* Advanced Reasoning Wall (Structured LLM-Style) */}
               <div style={{ marginTop: '40px', padding: '32px', background: 'rgba(0,0,0,0.3)', borderRadius: '24px', border: '1px solid rgba(255,255,255,0.03)' }}>
                   <h4 style={{ fontSize: '0.9rem', color: '#64748b', marginBottom: '20px', textTransform: 'uppercase', fontWeight: 900, letterSpacing: '0.1em', display: 'flex', alignItems: 'center', gap: '12px' }}><CheckCircle size={18} color="#10b981" /> Strategic Technical Wall (Qwen)</h4>
@@ -304,33 +265,6 @@ export default function RecordView() {
                         })
                       }
                   </div>
-=======
-              {/* Wall of Logic (Qwen) */}
-              <div style={{ marginTop: '40px', padding: '32px', background: 'linear-gradient(180deg, rgba(16,185,129,0.08) 0%, rgba(0,0,0,0.35) 100%)', borderRadius: '24px', border: '1px solid rgba(16,185,129,0.25)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-                  <h4 style={{ fontSize: '0.9rem', color: '#10b981', textTransform: 'uppercase', fontWeight: 900, letterSpacing: '0.1em', display: 'flex', alignItems: 'center', gap: '12px' }}><CheckCircle size={18} color="#10b981" /> Wall of Logic (Qwen)</h4>
-                  <span style={{ fontSize: '0.72rem', fontWeight: 800, color: '#86efac', letterSpacing: '0.08em' }}>{result.model_attribution?.qwen?.reasoning_available ? 'ACTIVE' : 'DEGRADED'}</span>
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                  {result.expert_reasoning_points
-                    .split('\n')
-                    .filter(line => line.trim())
-                    .map((line, i) => {
-                      const parts = line.split(/\*\*(.*?)\*\*/g);
-                      return (
-                        <div key={i} style={{ border: '1px solid rgba(255,255,255,0.05)', borderRadius: '14px', padding: '14px 16px', background: 'rgba(0,0,0,0.25)' }}>
-                          <p style={{ fontSize: '1rem', color: line.trim().startsWith('•') ? '#f1f5f9' : '#cbd5e1', lineHeight: 1.8, margin: 0 }}>
-                            {parts.map((part, j) =>
-                              j % 2 === 1
-                                ? <strong key={j} style={{ color: '#34d399', fontWeight: 800 }}>{part}</strong>
-                                : part
-                            )}
-                          </p>
-                        </div>
-                      );
-                    })}
-                </div>
->>>>>>> upstream/main
               </div>
             </div>
 
@@ -350,73 +284,6 @@ export default function RecordView() {
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
-<<<<<<< HEAD
-=======
-            {/* Model Attribution */}
-            <div className="glass-panel" style={{ padding: '28px', background: 'rgba(255,255,255,0.02)' }}>
-              <h4 style={{ marginBottom: '18px', display: 'flex', alignItems: 'center', gap: '10px', fontSize: '1rem', fontWeight: 900, color: '#38bdf8' }}>
-                <Sparkles size={18} /> Model Attribution
-              </h4>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
-                <div style={{ padding: '14px', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(0,0,0,0.25)' }}>
-                  <div style={{ fontSize: '0.75rem', color: '#93c5fd', fontWeight: 800, letterSpacing: '0.07em' }}>XLM-ROBERTA · LANGUAGE DETECTION</div>
-                  <div style={{ marginTop: '8px', fontWeight: 700 }}>{result.model_attribution?.xlm_roberta?.detected_language || result.language}</div>
-                  <div style={{ marginTop: '8px', height: '8px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)' }}>
-                    <div style={{ width: pct(result.model_attribution?.xlm_roberta?.confidence ?? result.language_confidence), height: '100%', borderRadius: '999px', background: 'linear-gradient(90deg, #38bdf8, #3b82f6)' }} />
-                  </div>
-                  <div style={{ marginTop: '6px', fontSize: '0.75rem', color: '#93c5fd' }}>{pct(result.model_attribution?.xlm_roberta?.confidence ?? result.language_confidence)} confidence</div>
-                </div>
-
-                <div style={{ padding: '14px', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(0,0,0,0.25)' }}>
-                  <div style={{ fontSize: '0.75rem', color: '#fda4af', fontWeight: 800, letterSpacing: '0.07em' }}>DEBERTA · TOPIC CLASSIFICATION</div>
-                  <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    {safeTopics.length === 0 ? (
-                      <div style={{ fontSize: '0.85rem', color: '#94a3b8' }}>No topic probabilities available.</div>
-                    ) : safeTopics.map((t, i) => (
-                      <div key={`${t.topic}-${i}`}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem' }}>
-                          <span style={{ color: '#f1f5f9', textTransform: 'capitalize' }}>{t.topic}</span>
-                          <span style={{ color: '#fda4af', fontWeight: 800 }}>{pct(t.score)}</span>
-                        </div>
-                        <div style={{ marginTop: '4px', height: '6px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)' }}>
-                          <div style={{ width: pct(t.score), height: '100%', borderRadius: '999px', background: 'linear-gradient(90deg, #fb7185, #f43f5e)' }} />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div style={{ padding: '14px', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(0,0,0,0.25)' }}>
-                  <div style={{ fontSize: '0.75rem', color: '#86efac', fontWeight: 800, letterSpacing: '0.07em' }}>FINBERT · SENTIMENT BREAKDOWN</div>
-                  <div style={{ marginTop: '10px', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
-                    {[
-                      { label: 'Positive', value: sentiment.positive ?? 0, color: '#22c55e' },
-                      { label: 'Neutral', value: sentiment.neutral ?? 0, color: '#f59e0b' },
-                      { label: 'Negative', value: sentiment.negative ?? 0, color: '#ef4444' },
-                    ].map((item) => (
-                      <div key={item.label} style={{ padding: '10px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.01)' }}>
-                        <div style={{ fontSize: '0.72rem', color: '#cbd5e1' }}>{item.label}</div>
-                        <div style={{ marginTop: '6px', fontWeight: 900, color: item.color }}>{pct(item.value)}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div style={{ padding: '14px', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(0,0,0,0.25)' }}>
-                  <div style={{ fontSize: '0.75rem', color: '#c4b5fd', fontWeight: 800, letterSpacing: '0.07em' }}>GLINER · ENTITY EXTRACTION</div>
-                  <div style={{ marginTop: '10px', display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                    {result.entities.length === 0 ? <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>No entities found.</span> : result.entities.slice(0, 8).map((e, i) => (
-                      <span key={`${e.type}-${i}`} style={{ fontSize: '0.75rem', padding: '7px 10px', borderRadius: '999px', border: '1px solid rgba(196,181,253,0.3)', color: '#ddd6fe', background: 'rgba(168,85,247,0.1)' }}>
-                        {e.type}: {e.value}{e.confidence !== undefined ? ` (${pct(e.confidence)})` : ''}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-
->>>>>>> upstream/main
             {/* World-Class Risk Analysis */}
             <div className="glass-panel" style={{ padding: '40px', background: `linear-gradient(to bottom, ${rc(result.risk_level)}10, transparent)` }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '15px', marginBottom: '24px' }}>

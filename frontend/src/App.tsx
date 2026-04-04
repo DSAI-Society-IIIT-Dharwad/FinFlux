@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, BarChart3, Loader2, LogOut, MessageSquare, Mic, Plus, Send, UserRound, Volume2 } from 'lucide-react';
 
 type ViewMode = 'chat' | 'insights';
@@ -561,7 +561,7 @@ function App() {
               className={`history-item ${activeThreadId === item.thread_id ? 'active' : ''}`}
               onClick={() => openHistoryThread(item.thread_id)}
             >
-              <div className="history-topic">{item.topic || 'General'} · {item.count}</div>
+              <div className="history-topic">{item.topic || 'General'} ┬╖ {item.count}</div>
               <div className="history-snippet">{(item.preview || '').slice(0, 70)}</div>
             </button>
           ))}
@@ -806,3 +806,4 @@ function App() {
 }
 
 export default App;
+

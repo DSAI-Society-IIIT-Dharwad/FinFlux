@@ -3,11 +3,7 @@ import os
 import torch
 import json
 import re
-<<<<<<< HEAD
 from typing import Dict, Any, List
-=======
-from typing import Dict, Any, List, Optional, cast
->>>>>>> upstream/main
 from transformers import pipeline
 from finflux import config
 
@@ -15,18 +11,10 @@ try:
     from gliner import GLiNER
     HAS_GLINER = True
 except ImportError:
-<<<<<<< HEAD
-    HAS_GLINER = False
-
-class ProductionExpertModule:
-    """Consolidated 4-Model High-Performance NLP Stack (V4.2)."""
-=======
-    GLiNER = None
     HAS_GLINER = False
 
 class ProductionExpertModule:
     """Consolidated 7-Model High-Performance NLP Stack (V4.2+)."""
->>>>>>> upstream/main
 
     _instance = None
 
@@ -45,54 +33,21 @@ class ProductionExpertModule:
 
     def _init_stack(self):
         self.device = 0 if config.USE_CUDA and torch.cuda.is_available() else -1
-<<<<<<< HEAD
-        print(f"[ProductionExpertModule] Initializing Modular Stack on device={self.device}...")
+        print(f"[ProductionExpertModule] Initializing 4-Model Stack on device={self.device}...")
 
-        # ── Stage 1: Precise Language Detection (XLM-Roberta) ──
+        # Stage 1: Precise Language Detection (XLM-Roberta)
         self.lang_pipe = pipeline("text-classification", model=config.HF_LANG_DETECT, device=self.device)
 
-        # ── Stage 2: Topic & Advice Classification (DeBERTa v3) ──
+        # Stage 2: Topic & Advice Classification (DeBERTa v3)
         self.topic_pipe = pipeline("zero-shot-classification", model=config.HF_ZERO_SHOT, device=self.device)
         self.topics = ["investment", "loan", "EMI", "insurance", "mutual fund", "gold", "stock", "crypto", "property", "general"]
         self.advice_labels = ["asking for financial advice", "general discussion"]
 
-        # ── Stage 3: Financial Sentiment & Strategy (FinBERT) ──
+        # Stage 3: Financial Sentiment & Strategy (FinBERT)
         self.fin_pipe = pipeline("sentiment-analysis", model=config.HF_FINBERT, device=self.device)
 
-        # ── Stage 4: Zero-Shot Entity Extraction (GLiNER) ──
-        if HAS_GLINER:
-            print(f"[ProductionExpertModule] Loading GLiNER Specialist: {config.HF_NER_FINANCIAL}")
-            self.gliner = GLiNER.from_pretrained(config.HF_NER_FINANCIAL).to("cuda" if self.device == 0 else "cpu")
-        else:
-            self.gliner = None
-            self.ner_fallback = pipeline("ner", model=config.HF_NER_GENERAL, aggregation_strategy="simple", device=self.device)
-
-        # Labels for GLiNER semantic extraction
-        self.labels = [
-            "INVESTMENT", "LOAN", "EMI", "INSURANCE", "MUTUAL FUND", "GOLD", "STOCK", 
-            "PROPERTY", "AMOUNT", "INTEREST RATE", "TENURE", "BANK", "FINANCIAL GOAL"
-        ]
-
-=======
-        print(f"[ProductionExpertModule] Initializing 4-Model Stack on device={self.device}...")
-
-        # Pylance in some transformers versions narrows task overloads too aggressively.
-        # Cast once here so runtime behavior stays unchanged while static analysis remains clean.
-        make_pipeline = cast(Any, pipeline)
-
-        # Stage 1: Precise Language Detection (XLM-Roberta)
-        self.lang_pipe = make_pipeline("text-classification", model=config.HF_LANG_DETECT, device=self.device)
-
-        # Stage 2: Topic & Advice Classification (DeBERTa v3)
-        self.topic_pipe = make_pipeline("zero-shot-classification", model=config.HF_ZERO_SHOT, device=self.device)
-        self.topics = ["investment", "loan", "EMI", "insurance", "mutual fund", "gold", "stock", "crypto", "property", "general"]
-        self.advice_labels = ["asking for financial advice", "general discussion"]
-
-        # Stage 3: Financial Sentiment & Strategy (FinBERT)
-        self.fin_pipe = make_pipeline("sentiment-analysis", model=config.HF_FINBERT, device=self.device)
-
         # Stage 4: Zero-Shot Entity Extraction (GLiNER handled everything)
-        if HAS_GLINER and GLiNER is not None:
+        if HAS_GLINER:
             print(f"[ProductionExpertModule] Loading GLiNER Specialized: {config.HF_NER_FINANCIAL}")
             self.gliner = GLiNER.from_pretrained(config.HF_NER_FINANCIAL).to("cuda" if self.device == 0 else "cpu")
         else:
@@ -101,22 +56,18 @@ class ProductionExpertModule:
         # Disabled models (skip loading to save VRAM/stability)
         self.ner_general = None
         self.indic_ner = None
-        self.stt_pipe: Optional[Any] = None
+        self.stt_pipe = None
 
-        # Consolidated labels for GLiNER semantic extraction (High-Resolution V4.2+)
+        # Consolidated labels for GLiNER semantic extraction
         self.labels = [
-            "INVESTMENT AMOUNT", "MONTHLY SIP AMOUNT", "LOAN AMOUNT", "EMI AMOUNT",
-            "INCOME", "TENURE", "INTEREST RATE", "RETURNS PERCENTAGE",
-            "SIP", "EMI", "LOAN", "INSURANCE", "MUTUAL FUND", "FIXED DEPOSIT",
-            "GOLD", "STOCK", "CRYPTO", "PROPERTY", "NPS", "ELSS", "PPF",
-            "BANK NAME", "FUND HOUSE", "FINANCIAL GOAL",
-            "PERSON NAME", "ORGANIZATION", "LOCATION",
-            "RISK LEVEL", "FUND CATEGORY", "LOCK IN PERIOD"
+            "INVESTMENT", "LOAN", "EMI", "INSURANCE", "MUTUAL FUND", "GOLD", "STOCK", 
+            "PROPERTY", "AMOUNT", "INTEREST RATE", "TENURE", "BANK", "FINANCIAL GOAL",
+            "PERSON", "ORGANIZATION", "LOCATION"
         ]
 
     def transcribe_local(self, audio_path: str) -> str:
         """Local ASR fallback using Whisper-Hindi-Small."""
-        if not hasattr(self, 'stt_pipe') or self.stt_pipe is None: return ""
+        if not hasattr(self, 'stt_pipe'): return ""
         try:
             res = self.stt_pipe(audio_path)
             return res.get("text", "")
@@ -124,7 +75,6 @@ class ProductionExpertModule:
             print(f"[ProductionExpertModule] Local STT Error: {e}")
             return ""
 
->>>>>>> upstream/main
     def _gliner_safe(self, text: str) -> list:
         """Split text into chunks of max 300 chars to avoid GLiNER memory/token issues."""
         if not self.gliner: return []
@@ -163,111 +113,37 @@ class ProductionExpertModule:
             # 1. Language Logic
             lang_res = self.lang_pipe(safe_text, truncation=True)[0]
             detected_lang = lang_res["label"]
-<<<<<<< HEAD
-=======
-            language_confidence = float(lang_res.get("score", 0.0))
->>>>>>> upstream/main
 
             # 2. Topic & Advice Logic
             topic_res = self.topic_pipe(safe_text, candidate_labels=self.topics, multi_label=True, truncation=True)
             advice_res = self.topic_pipe(safe_text, candidate_labels=self.advice_labels, multi_label=False, truncation=True)
             top_topic = topic_res["labels"][0]
             confidence_score = round(topic_res["scores"][0], 2)
-<<<<<<< HEAD
-=======
-            topic_top3 = [
-                {
-                    "topic": topic_res["labels"][i],
-                    "score": float(topic_res["scores"][i])
-                }
-                for i in range(min(3, len(topic_res.get("labels", []))))
-            ]
->>>>>>> upstream/main
 
             # 3. FinBERT Sentiment/Urgency
             fin_res = self.fin_pipe(safe_text, truncation=True)[0]
             sentiment_label = fin_res["label"]
-<<<<<<< HEAD
-
-            # 4. NER Extraction (GLiNER handled separately via safe chunking)
-=======
-            sentiment_score = float(fin_res.get("score", 0.0))
-            sentiment_map = {
-                "positive": 0.0,
-                "negative": 0.0,
-                "neutral": 0.0,
-            }
-            normalized_sentiment = str(sentiment_label).lower()
-            if "pos" in normalized_sentiment:
-                sentiment_map["positive"] = sentiment_score
-            elif "neg" in normalized_sentiment:
-                sentiment_map["negative"] = sentiment_score
-            else:
-                sentiment_map["neutral"] = sentiment_score
 
             # 4. GLiNER Specialist Extraction (Strict mode, no fallback noise)
->>>>>>> upstream/main
             ner_items = []
             if self.gliner:
                 entities = self._gliner_safe(safe_text)
                 for ent in entities:
                     label = ent["label"].replace(" ", "_").upper()
-<<<<<<< HEAD
-                    if label == "MUTUAL_FUND": label = "MUTUAL_FUND"
-                    ner_items.append({"type": label, "value": ent["text"], "context": f"Extracted via GLiNER {config.HF_NER_FINANCIAL}"})
-            else:
-                for item in self.ner_fallback(text):
-                    ner_items.append({"type": item["entity_group"], "value": item["word"], "context": "Fallback NER"})
-
-            return {
-                "detected_language": detected_lang,
-                "topic": top_topic,
-                "confidence_score": confidence_score,
-                "financial_sentiment": sentiment_label,
-                "is_advice_request": advice_res["labels"][0] == "asking for financial advice" and advice_res["scores"][0] > 0.6,
-                "entities": ner_items
-=======
                     ner_items.append({
                         "type": label, 
                         "value": ent["text"], 
-                        "context": "GLiNER Specialist",
-                        "confidence": float(ent.get("score", 0.0))
+                        "context": "GLiNER Specialist"
                     })
-
-            model_attribution = {
-                "xlm_roberta": {
-                    "detected_language": detected_lang,
-                    "confidence": language_confidence,
-                },
-                "deberta": {
-                    "top_topic": top_topic,
-                    "top3_topics": topic_top3,
-                },
-                "finbert": {
-                    "label": sentiment_label,
-                    "breakdown": sentiment_map,
-                },
-                "gliner": {
-                    "entity_count": len(ner_items),
-                },
-                "qwen": {
-                    "reasoning_available": True,
-                },
-            }
 
             return {
                 "detected_language": detected_lang,
-                "language_confidence": language_confidence,
                 "topic": top_topic,
                 "confidence_score": confidence_score,
-                "topic_top3": topic_top3,
                 "financial_sentiment": sentiment_label,
-                "sentiment_breakdown": sentiment_map,
                 "is_advice_request": advice_res["labels"][0] == "asking for financial advice" and advice_res["scores"][0] > 0.6,
                 "entities": ner_items,
-                "stt_engine": "Groq-Whisper (Primary)", # Metadata
-                "model_attribution": model_attribution,
->>>>>>> upstream/main
+                "stt_engine": "Groq-Whisper (Primary)" # Metadata
             }
         except Exception as e:
             print(f"[ProductionExpertModule] Pipeline error: {e}")
