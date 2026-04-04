@@ -12,6 +12,31 @@ interface ModelAttribution {
   qwen?: { reasoning_available?: boolean; section?: string };
 }
 interface TimingData { total_s?: number; asr_s?: number; normalization_s?: number; expert_nlp_s?: number; synthesis_s?: number }
+interface RagRetrievedRow {
+  conversation_id?: string;
+  score?: number;
+  document?: string;
+  metadata?: {
+    timestamp?: string;
+    risk_level?: string;
+    topic?: string;
+    sentiment?: string;
+    language?: string;
+  };
+}
+interface RagInsight {
+  contextual_insight?: string;
+  pattern_summary?: string[];
+  risk_trajectory?: string;
+  recommended_next_focus?: string[];
+  confidence?: string;
+}
+interface RagResponse {
+  query?: string;
+  retrieval?: { available?: boolean; plan?: { semantic_query?: string; filters?: Record<string, unknown>; mode?: string; top_k?: number }; results?: RagRetrievedRow[] };
+  rag_context?: string;
+  insight?: RagInsight;
+}
 interface AnalysisResult {
   conversation_id: string; timestamp: string; language: string;
   financial_topic: string; risk_level: string;
@@ -49,6 +74,9 @@ function encodeWavBlob(samples: Float32Array, sr: number): Blob {
 export default function RecordView() {
   const [mode, setMode] = useState<'idle' | 'recording' | 'processing' | 'done'>('idle');
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [ragResult, setRagResult] = useState<RagResponse | null>(null);
+  const [ragLoading, setRagLoading] = useState(false);
+  const [ragError, setRagError] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [recordingTime, setRecordingTime] = useState(0);
   const [isEditing, setIsEditing] = useState(false);
@@ -59,6 +87,49 @@ export default function RecordView() {
   const animFrameRef = useRef<number>(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const fetchRagInsight = async (analysis: AnalysisResult) => {
+    setRagLoading(true);
+    setRagError('');
+    try {
+      const querySource = (analysis.executive_summary || analysis.transcript || '').trim();
+      const response = await fetch('http://localhost:8000/api/rag/insight', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: querySource || 'Summarize relevant historical financial patterns.',
+          top_k: 6,
+          financial_sentiment: analysis.financial_sentiment || 'Neutral',
+          filters: {
+            language: (analysis.language || '').toLowerCase() || 'unknown',
+            risk_level: analysis.risk_level || undefined,
+            topic: analysis.financial_topic || undefined,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        let message = `RAG unavailable (${response.status})`;
+        try {
+          const body = await response.json();
+          if (body?.detail) message = String(body.detail);
+        } catch {
+          // keep fallback message
+        }
+        setRagResult(null);
+        setRagError(message);
+        return;
+      }
+
+      const data = await response.json();
+      setRagResult(data);
+    } catch {
+      setRagResult(null);
+      setRagError('Could not fetch RAG output');
+    } finally {
+      setRagLoading(false);
+    }
+  };
+
   const saveChanges = async () => {
     if(!result) return;
     setIsSaving(true);
@@ -68,7 +139,10 @@ export default function RecordView() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transcript: result.transcript, executive_summary: result.executive_summary })
       });
-      if(res.ok) setIsEditing(false);
+      if(res.ok) {
+        setIsEditing(false);
+        void fetchRagInsight(result);
+      }
       else { setErrorMsg('Save failed'); }
     } catch { setErrorMsg('Connection failed'); }
     finally { setIsSaving(false); }
@@ -130,10 +204,17 @@ export default function RecordView() {
     const fd = new FormData(); 
     fd.append('file', wav);
     fd.append('user_id', 'guest_001'); // Mandatory tenant tag
+    setRagResult(null);
+    setRagError('');
 
     try {
         const res = await fetch('http://localhost:8000/api/analyze', { method: 'POST', body: fd });
-        if(res.ok) { setResult(await res.json()); setMode('done'); } 
+      if(res.ok) {
+        const analysis = await res.json();
+        setResult(analysis);
+        setMode('done');
+        void fetchRagInsight(analysis);
+      }
         else { setMode('idle'); setErrorMsg('Server Error: ' + res.statusText); }
     } catch (e) {
         setMode('idle'); setErrorMsg('Connection Error: ' + e);
@@ -149,6 +230,15 @@ export default function RecordView() {
   const pct = (value?: number) => `${Math.max(0, Math.min(100, Math.round((value ?? 0) * 100)))}%`;
   const safeTopics = (result?.model_attribution?.deberta?.top3_topics || result?.topic_top3 || []);
   const sentiment = result?.model_attribution?.finbert?.breakdown || result?.sentiment_breakdown || {};
+  const ragRows = ragResult?.retrieval?.results || [];
+  const ragInsight = ragResult?.insight;
+  const extractSummary = (doc?: string) => {
+    if (!doc) return 'No summary available.';
+    if (doc.includes('Executive Summary:')) {
+      return doc.split('Executive Summary:')[1]?.split('Transcript:')[0]?.trim() || 'No summary available.';
+    }
+    return doc.slice(0, 220);
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '32px', maxWidth: '1200px', margin: '0 auto', color: '#f8fafc' }}>
@@ -365,6 +455,100 @@ export default function RecordView() {
                   </div>
                 </div>
               </div>
+            </div>
+
+            {/* RAG Memory Output */}
+            <div className="glass-panel" style={{ padding: '28px', background: 'rgba(59,130,246,0.04)', border: '1px solid rgba(59,130,246,0.18)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
+                <h4 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px', fontSize: '1rem', fontWeight: 900, color: '#60a5fa' }}>
+                  <Sparkles size={18} /> RAG Memory Output
+                </h4>
+                <button
+                  onClick={() => result && fetchRagInsight(result)}
+                  style={{ padding: '8px 12px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.03)', color: '#e2e8f0', cursor: 'pointer', fontWeight: 700, fontSize: '0.75rem' }}
+                >
+                  REFRESH
+                </button>
+              </div>
+
+              {ragLoading && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#93c5fd' }}>
+                  <Loader2 className="spin" size={16} />
+                  <span style={{ fontSize: '0.9rem' }}>Fetching related sessions...</span>
+                </div>
+              )}
+
+              {!ragLoading && ragError && (
+                <p style={{ margin: 0, color: '#fda4af', fontSize: '0.9rem', lineHeight: 1.5 }}>{ragError}</p>
+              )}
+
+              {!ragLoading && !ragError && ragInsight && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  <p style={{ margin: 0, color: '#f8fafc', lineHeight: 1.65, fontSize: '0.95rem' }}>
+                    {ragInsight.contextual_insight || 'No RAG insight generated yet.'}
+                  </p>
+
+                  <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                    <span style={{ padding: '5px 10px', borderRadius: '999px', fontSize: '0.7rem', fontWeight: 800, background: 'rgba(96,165,250,0.2)', color: '#bfdbfe' }}>
+                      Retrieved: {ragRows.length}
+                    </span>
+                    <span style={{ padding: '5px 10px', borderRadius: '999px', fontSize: '0.7rem', fontWeight: 800, background: 'rgba(16,185,129,0.2)', color: '#86efac' }}>
+                      Trajectory: {ragInsight.risk_trajectory || 'unknown'}
+                    </span>
+                    <span style={{ padding: '5px 10px', borderRadius: '999px', fontSize: '0.7rem', fontWeight: 800, background: 'rgba(168,85,247,0.2)', color: '#ddd6fe' }}>
+                      Confidence: {ragInsight.confidence || 'unknown'}
+                    </span>
+                  </div>
+
+                  {!!(ragInsight.pattern_summary || []).length && (
+                    <div>
+                      <div style={{ fontSize: '0.72rem', color: '#93c5fd', fontWeight: 900, marginBottom: '8px', letterSpacing: '0.05em' }}>PATTERN SUMMARY</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {(ragInsight.pattern_summary || []).map((point, idx) => (
+                          <div key={idx} style={{ fontSize: '0.86rem', color: '#cbd5e1', lineHeight: 1.45 }}>
+                            • {point}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {!!(ragInsight.recommended_next_focus || []).length && (
+                    <div>
+                      <div style={{ fontSize: '0.72rem', color: '#a7f3d0', fontWeight: 900, marginBottom: '8px', letterSpacing: '0.05em' }}>NEXT FOCUS</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {(ragInsight.recommended_next_focus || []).map((point, idx) => (
+                          <div key={idx} style={{ fontSize: '0.86rem', color: '#bbf7d0', lineHeight: 1.45 }}>
+                            • {point}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {!!ragRows.length && (
+                    <div style={{ marginTop: '4px' }}>
+                      <div style={{ fontSize: '0.72rem', color: '#fcd34d', fontWeight: 900, marginBottom: '10px', letterSpacing: '0.05em' }}>RETRIEVED SESSIONS</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        {ragRows.slice(0, 5).map((row, idx) => (
+                          <div key={idx} style={{ padding: '12px', borderRadius: '12px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)' }}>
+                            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' }}>
+                              <span style={{ fontSize: '0.68rem', color: '#93c5fd' }}>#{idx + 1}</span>
+                              <span style={{ fontSize: '0.68rem', color: '#f1f5f9' }}>{row.conversation_id || 'unknown'}</span>
+                              <span style={{ fontSize: '0.68rem', color: '#a7f3d0' }}>score {(row.score ?? 0).toFixed(2)}</span>
+                              <span style={{ fontSize: '0.68rem', color: '#fcd34d' }}>{row.metadata?.risk_level || 'UNKNOWN'}</span>
+                              <span style={{ fontSize: '0.68rem', color: '#c4b5fd' }}>{row.metadata?.topic || 'general'}</span>
+                            </div>
+                            <div style={{ fontSize: '0.84rem', color: '#cbd5e1', lineHeight: 1.45 }}>
+                              {extractSummary(row.document)}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* World-Class Risk Analysis */}
