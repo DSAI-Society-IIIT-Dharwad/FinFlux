@@ -17,10 +17,10 @@ GROQ_LLM_REASON_MODEL = "qwen/qwen3-32b" # Specialist Reasoner
 HF_FINBERT            = "ProsusAI/finbert" # Financial Sentiment
 HF_ZERO_SHOT          = "cross-encoder/nli-deberta-v3-small" # Generic Topic
 HF_NER_FINANCIAL      = "urchade/gliner_medium-v2.1" # Zero-Shot NER
-HF_NER_GENERAL        = "mrm8488/deberta-v3-small-finetuned-mrpc"
+HF_NER_GENERAL        = None  # skip, wrong model
 HF_LANG_DETECT        = "papluca/xlm-roberta-base-language-detection" # Precise Lang Gating
-HF_INDIC_NER          = "Davlan/bert-base-multilingual-cased-ner-hrl"
-HF_INDIC_STT          = "vasista22/whisper-hindi-small"
+HF_INDIC_NER          = None  # skip, not downloaded
+HF_INDIC_STT          = None  # skip, not downloaded
 
 # ── CONFIG ────────────────────────────────────────
 USE_CUDA              = os.environ.get("USE_CUDA", "true").lower() == "true"

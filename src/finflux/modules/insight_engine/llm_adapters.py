@@ -13,8 +13,17 @@ class GroqWhisperAdapter:
         self.url = "https://api.groq.com/openai/v1/audio/transcriptions"
 
     def transcribe(self, audio_path: str, language: str = None) -> Dict[str, Any]:
+        """High-resolution transcription via Groq Whisper."""
         if not self.api_key:
             return {"error": "GROQ_API_KEY not set", "text": ""}
+
+        # Check file size before sending — Groq limit is 25MB
+        import os
+        file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+        if file_size_mb > 24:
+            print(f"[GroqWhisper] File too large ({file_size_mb:.1f}MB), switching to local fallback")
+            return {"error": "file_too_large", "text": ""}
+            
         headers = {"Authorization": f"Bearer {self.api_key}"}
         data = {
             "model": config.GROQ_STT_MODEL,
