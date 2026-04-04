@@ -22,7 +22,6 @@ sentencepiece
 numpy
 pydub
 sqlalchemy
-chromadb
 sentence-transformers
 bcrypt
 python-dotenv
