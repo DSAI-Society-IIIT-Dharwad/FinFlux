@@ -2,7 +2,6 @@
 import os
 import torch
 import json
-import re
 from typing import Dict, Any, List
 from transformers import pipeline
 from finflux import config
@@ -19,32 +18,26 @@ class ProductionExpertModule:
     _instance = None
 
     def __new__(cls):
-        """Singleton pattern: Optimized lazy loading stack."""
+        """Singleton pattern: Load models ONCE to save 3GB VRAM."""
         if cls._instance is None:
             cls._instance = super(ProductionExpertModule, cls).__new__(cls)
-            cls._instance.loaded = False
+            cls._instance._init_stack()
         return cls._instance
-
-    def warm(self):
-        """Manually trigger model stack loading."""
-        if not self.loaded:
-            self._init_stack()
-            self.loaded = True
 
     def _init_stack(self):
         self.device = 0 if config.USE_CUDA and torch.cuda.is_available() else -1
         print(f"[ProductionExpertModule] Initializing Modular Stack on device={self.device}...")
 
         # ── Stage 1: Precise Language Detection (XLM-Roberta) ──
-        self.lang_pipe = pipeline("text-classification", model=config.HF_LANG_DETECT, device=self.device)
+        self.lang_pipe = pipeline("text-classification", model=config.HF_LANG_DETECT, device=self.device, token=config.HF_TOKEN)
 
         # ── Stage 2: Topic & Advice Classification (DeBERTa v3) ──
-        self.topic_pipe = pipeline("zero-shot-classification", model=config.HF_ZERO_SHOT, device=self.device)
+        self.topic_pipe = pipeline("zero-shot-classification", model=config.HF_ZERO_SHOT, device=self.device, token=config.HF_TOKEN)
         self.topics = ["investment", "loan", "EMI", "insurance", "mutual fund", "gold", "stock", "crypto", "property", "general"]
         self.advice_labels = ["asking for financial advice", "general discussion"]
 
         # ── Stage 3: Financial Sentiment & Strategy (FinBERT) ──
-        self.fin_pipe = pipeline("sentiment-analysis", model=config.HF_FINBERT, device=self.device)
+        self.fin_pipe = pipeline("sentiment-analysis", model=config.HF_FINBERT, device=self.device, token=config.HF_TOKEN)
 
         # ── Stage 4: Zero-Shot Entity Extraction (GLiNER) ──
         if HAS_GLINER:
@@ -52,7 +45,7 @@ class ProductionExpertModule:
             self.gliner = GLiNER.from_pretrained(config.HF_NER_FINANCIAL).to("cuda" if self.device == 0 else "cpu")
         else:
             self.gliner = None
-            self.ner_fallback = pipeline("ner", model=config.HF_NER_GENERAL, aggregation_strategy="simple", device=self.device)
+            self.ner_fallback = pipeline("ner", model=config.HF_NER_GENERAL, aggregation_strategy="simple", device=self.device, token=config.HF_TOKEN)
 
         # Labels for GLiNER semantic extraction
         self.labels = [
@@ -60,59 +53,34 @@ class ProductionExpertModule:
             "PROPERTY", "AMOUNT", "INTEREST RATE", "TENURE", "BANK", "FINANCIAL GOAL"
         ]
 
-    def _gliner_safe(self, text: str) -> list:
-        """Split text into chunks of max 300 chars to avoid GLiNER memory/token issues."""
-        if not self.gliner: return []
-        
-        # Split on sentence boundaries (including Hindi full stop)
-        sentences = re.split(r'[।.!?]\s+', text)
-        chunks, current = [], ""
-        for s in sentences:
-            if len(current) + len(s) < 300:
-                current += s + ". "
-            else:
-                if current: chunks.append(current.strip())
-                current = s + ". "
-        if current: chunks.append(current.strip())
-        
-        all_entities = []
-        for chunk in chunks:
-            try:
-                entities = self.gliner.predict_entities(chunk, self.labels)
-                all_entities.extend(entities)
-            except Exception:
-                continue
-        return all_entities
-
     def process(self, text: str) -> Dict[str, Any]:
-        """Run the full integrated pipeline with lazy loading."""
-        if not self.loaded: self.warm()
+        """Run the full integrated pipeline with truncation for stability."""
         if not text.strip(): return {"error": "Empty input"}
 
         try:
             # 0. Truncation Gating (Prevent model overflow)
             # Most local models (DeBERTa, FinBERT) have 512 token limit.
-            # Truncating to ~1200 chars safely fits well within 512 tokens.
-            safe_text = text[:1200]
+            # Truncating to ~1800 chars safely fits.
+            safe_text = text[:1800]
 
             # 1. Language Logic
-            lang_res = self.lang_pipe(safe_text, truncation=True)[0]
+            lang_res = self.lang_pipe(safe_text)[0]
             detected_lang = lang_res["label"]
 
             # 2. Topic & Advice Logic
-            topic_res = self.topic_pipe(safe_text, candidate_labels=self.topics, multi_label=True, truncation=True)
-            advice_res = self.topic_pipe(safe_text, candidate_labels=self.advice_labels, multi_label=False, truncation=True)
+            topic_res = self.topic_pipe(safe_text, candidate_labels=self.topics, multi_label=True)
+            advice_res = self.topic_pipe(safe_text, candidate_labels=self.advice_labels, multi_label=False)
             top_topic = topic_res["labels"][0]
             confidence_score = round(topic_res["scores"][0], 2)
 
             # 3. FinBERT Sentiment/Urgency
-            fin_res = self.fin_pipe(safe_text, truncation=True)[0]
+            fin_res = self.fin_pipe(safe_text)[0]
             sentiment_label = fin_res["label"]
 
-            # 4. NER Extraction (GLiNER handled separately via safe chunking)
+            # 4. NER Extraction (GLiNER handled separately but safe_text used for consistency)
             ner_items = []
             if self.gliner:
-                entities = self._gliner_safe(safe_text)
+                entities = self.gliner.predict_entities(safe_text, self.labels)
                 for ent in entities:
                     label = ent["label"].replace(" ", "_").upper()
                     if label == "MUTUAL_FUND": label = "MUTUAL_FUND"
