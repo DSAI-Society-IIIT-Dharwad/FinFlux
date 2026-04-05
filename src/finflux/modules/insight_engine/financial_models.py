@@ -3,6 +3,8 @@ import os
 import torch
 import json
 import re
+import requests
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Optional, cast
 from transformers import pipeline
 from finflux import config
@@ -46,8 +48,64 @@ class ProductionExpertModule:
 
         # Stage 2: Topic & Advice Classification (DeBERTa v3)
         self.topic_pipe = make_pipeline("zero-shot-classification", model=config.HF_ZERO_SHOT, device=self.device)
-        self.topics = ["investment", "loan", "EMI", "insurance", "mutual fund", "gold", "stock", "crypto", "property", "general"]
+        self.topic_level1_labels = [
+            "DEBT_MANAGEMENT",
+            "INVESTMENT_PLANNING",
+            "INSURANCE_PROTECTION",
+            "TAX_PLANNING",
+            "BUDGETING",
+            "ASSET_PURCHASE",
+            "RETIREMENT",
+            "EMERGENCY_FUND",
+            "GENERAL_FINANCIAL",
+        ]
+        self.topic_level2_labels = [
+            "home_loan",
+            "personal_loan",
+            "car_loan",
+            "education_loan",
+            "credit_card",
+            "SIP",
+            "mutual_fund",
+            "direct_equity",
+            "FD",
+            "PPF",
+            "NPS",
+            "term_insurance",
+            "health_insurance",
+            "gold",
+            "real_estate",
+            "crypto",
+        ]
         self.advice_labels = ["asking for financial advice", "general discussion"]
+
+        # Lightweight dictionary for real-time chunk detection (DeBERTa-free).
+        self.financial_keywords = [
+            "loan", "home loan", "personal loan", "car loan", "education loan", "gold loan", "business loan", "emi", "instalment",
+            "interest", "interest rate", "floating rate", "fixed rate", "prepayment", "foreclosure", "tenure", "principal", "outstanding",
+            "credit", "credit card", "credit limit", "minimum due", "billing cycle", "statement", "late fee", "cibil", "credit score",
+            "debt", "debt management", "debt consolidation", "liability", "repayment", "default", "penalty", "bounce", "overdue",
+            "salary", "income", "monthly income", "cashflow", "expenses", "expense", "budget", "savings", "monthly savings",
+            "emergency fund", "rainy day fund", "contingency", "buffer", "liquidity", "reserve", "corpus",
+            "invest", "investment", "investing", "sip", "lumpsum", "mutual fund", "nav", "amc", "fund house", "folio",
+            "equity", "stock", "shares", "index fund", "etf", "smallcap", "midcap", "largecap", "diversification",
+            "returns", "yield", "xirr", "cagr", "alpha", "beta", "volatility", "risk", "risk profile", "asset allocation",
+            "fixed deposit", "fd", "rd", "recurring deposit", "bond", "debenture", "treasury", "gsec",
+            "ppf", "nps", "epf", "vpf", "elss", "ulip", "retirement", "pension", "annuity", "superannuation",
+            "insurance", "term insurance", "health insurance", "mediclaim", "premium", "sum assured", "coverage", "deductible", "claim",
+            "tax", "income tax", "tax saving", "80c", "80d", "87a", "hra", "tds", "capital gains", "gst", "itr",
+            "property", "real estate", "down payment", "registry", "stamp duty", "maintenance", "rent", "rental yield",
+            "gold", "digital gold", "sovereign gold bond", "sgb", "silver", "commodity", "crypto", "bitcoin", "ethereum",
+            "upi", "bank", "bank account", "savings account", "current account", "ifsc", "neft", "rtgs", "imps",
+            "balance", "statement", "nominee", "kyc", "pan", "aadhaar", "demat", "broker", "trading",
+            "किस्त", "ब्याज", "बचत", "निवेश", "ऋण", "कर्ज", "आय", "खर्च", "बीमा", "प्रीमियम", "कर", "टैक्स",
+            "होम लोन", "पर्सनल लोन", "क्रेडिट कार्ड", "म्यूचुअल फंड", "सिप", "एफडी", "पीपीएफ", "एनपीएस", "रिटायरमेंट",
+            "डाउन पेमेंट", "इमरजेंसी फंड", "रेटन", "रिटर्न", "लाभ", "हानि", "जोखिम", "सम्पत्ति", "संपत्ति", "बैंक",
+            "emi", "sip amount", "loan amount", "interest pa", "percent returns", "tax section", "fund name", "bank name",
+            "insurance premium", "fd amount", "investment goal", "expense category", "monthly income", "monthly savings",
+            "cash", "wallet", "networth", "wealth", "financial", "finance", "advisor", "advice", "planning", "goal",
+            "child education", "marriage fund", "vacation fund", "house purchase", "vehicle purchase", "inflation", "cost of living",
+        ]
 
         # Stage 3: Financial Sentiment & Strategy (FinBERT)
         self.fin_pipe = make_pipeline("sentiment-analysis", model=config.HF_FINBERT, device=self.device)
@@ -66,16 +124,77 @@ class ProductionExpertModule:
 
         # Consolidated labels for GLiNER semantic extraction (High-Resolution V4.2+)
         self.labels = [
-            "INVESTMENT AMOUNT", "MONTHLY SIP AMOUNT", "LOAN AMOUNT", "EMI AMOUNT",
-            "INCOME", "TENURE", "INTEREST RATE", "RETURNS PERCENTAGE",
-            "SIP", "EMI", "LOAN", "INSURANCE", "MUTUAL FUND", "FIXED DEPOSIT",
-            "GOLD", "STOCK", "CRYPTO", "PROPERTY", "NPS", "ELSS", "PPF",
-            "BANK NAME", "FUND HOUSE", "FINANCIAL GOAL",
-            "PERSON NAME", "ORGANIZATION", "LOCATION",
-            "RISK LEVEL", "FUND CATEGORY", "LOCK IN PERIOD"
+            "EMI AMOUNT",
+            "SIP AMOUNT",
+            "LOAN AMOUNT",
+            "LOAN TENURE",
+            "INTEREST RATE",
+            "CIBIL SCORE",
+            "FUND NAME",
+            "BANK NAME",
+            "INSURANCE PREMIUM",
+            "FD AMOUNT",
+            "TAX SECTION",
+            "INVESTMENT GOAL",
+            "EXPENSE CATEGORY",
+            "MONTHLY INCOME",
+            "MONTHLY SAVINGS",
+            # Existing high-signal labels retained for broader extraction coverage.
+            "RETURNS PERCENTAGE",
+            "MUTUAL FUND",
+            "RISK LEVEL",
+            "FUND CATEGORY",
+            "PROPERTY",
+            "GOLD",
+            "STOCK",
+            "CRYPTO",
         ]
 
-        self.financial_nlp = FinancialNLPAnalyzer(max_chars=config.FINANCIAL_NLP_MAX_CHARS)
+    def _rule_based_entities(self, text: str) -> List[Dict[str, Any]]:
+        """Rule-based catcher for Indian financial formats and Hindi terms missed by GLiNER."""
+        results: List[Dict[str, Any]] = []
+
+        # Indian number formats: 1.5 lakh, 50k, 2 crore, Rs 50,000, ₹1,20,000
+        amount_pattern = re.compile(
+            r"(?:₹|rs\.?\s*)?\b\d+(?:[.,]\d+)?(?:\s?[,\d]{0,10})\s?(?:k|thousand|lakh|lakhs|lac|crore|crores|cr)?\b",
+            flags=re.IGNORECASE,
+        )
+        for m in amount_pattern.finditer(text):
+            val = m.group(0).strip()
+            if not val:
+                continue
+            lower = val.lower()
+            if any(tok in lower for tok in ["%", "percent", "pa", "p.a"]):
+                continue
+            results.append({"type": "LOAN AMOUNT", "value": val, "confidence": 0.90, "source": "rule_based"})
+
+        # Percentage expressions: 8.5% pa, 12 percent returns, 10% per annum
+        pct_pattern = re.compile(
+            r"\b\d+(?:\.\d+)?\s?(?:%|percent)\s?(?:pa|p\.a\.?|per\s+annum)?\b",
+            flags=re.IGNORECASE,
+        )
+        for m in pct_pattern.finditer(text):
+            val = m.group(0).strip()
+            if val:
+                results.append({"type": "INTEREST RATE", "value": val, "confidence": 0.90, "source": "rule_based"})
+
+        # Hindi financial terms mapping.
+        hindi_terms = {
+            "किस्त": "EMI AMOUNT",
+            "ब्याज": "INTEREST RATE",
+            "बचत": "MONTHLY SAVINGS",
+            "निवेश": "INVESTMENT GOAL",
+        }
+        for term, mapped_type in hindi_terms.items():
+            for _ in re.finditer(re.escape(term), text):
+                results.append({"type": mapped_type, "value": term, "confidence": 0.90, "source": "rule_based"})
+
+        # De-duplicate by (type, value).
+        dedup: Dict[str, Dict[str, Any]] = {}
+        for item in results:
+            key = f"{item['type']}::{str(item['value']).strip().lower()}"
+            dedup[key] = item
+        return list(dedup.values())
 
     def transcribe_local(self, audio_path: str) -> str:
         """Local ASR fallback using Whisper-Hindi-Small."""
@@ -111,23 +230,178 @@ class ProductionExpertModule:
                 continue
         return all_entities
 
-    @staticmethod
-    def _merge_entity_lists(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        merged: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
+    def _call_fast_llm(self, system_prompt: str, user_prompt: str) -> str:
+        api_key = config.GROQ_API_KEY
+        if not api_key:
+            return ""
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": config.GROQ_LLM_FAST_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.2,
+        }
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        return str(data.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
 
-        for item in primary + secondary:
-            entity_type = str(item.get("type", "")).strip().upper()
-            value = str(item.get("value", "")).strip()
-            if not entity_type or not value:
-                continue
-            key = (entity_type, value.lower())
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(item)
+    def route_intent(self, text: str) -> Dict[str, Any]:
+        """Three-way router: analysis, financial inquiry, or general conversation."""
+        if not self.loaded:
+            self.warm()
 
-        return merged
+        route_labels = [
+            "personal financial situation discussion",
+            "financial information request",
+            "non-financial conversation",
+        ]
+        safe_text = text[:800]
+        result = self.topic_pipe(safe_text, candidate_labels=route_labels, multi_label=False, truncation=True)
+        top_label = str(result["labels"][0])
+        top_score = float(result["scores"][0])
+
+        score_map = {str(label): float(score) for label, score in zip(result["labels"], result["scores"])}
+
+        if top_score < 0.55:
+            route = "financial_inquiry"
+        elif top_label == "personal financial situation discussion":
+            route = "analysis"
+        elif top_label == "non-financial conversation":
+            route = "general"
+        else:
+            route = "financial_inquiry"
+
+        return {
+            "route": route,
+            "label": top_label,
+            "score": top_score,
+            "scores": score_map,
+        }
+
+    def answer_financial_inquiry(self, question: str) -> str:
+        """Answer direct finance questions without strategic analysis."""
+        system_prompt = (
+            "You are a knowledgeable Indian financial educator. Answer the question directly, concisely, and helpfully. "
+            "Provide factual information without giving personalized financial advice. Use simple language. "
+            "Do not generate strategic analysis or McKinsey-style summaries. Just answer the question."
+        )
+        try:
+            answer = self._call_fast_llm(system_prompt, question)
+            return answer.strip() if answer.strip() else "I can help with that finance question."
+        except Exception as exc:
+            print(f"[ProductionExpertModule] Inquiry response error: {exc}")
+            return "I can help with that finance question."
+
+    def answer_casual(self, message: str) -> str:
+        """Answer casual conversation naturally without finance framing."""
+        system_prompt = (
+            "You are a friendly conversational assistant. Reply naturally, warmly, and briefly. "
+            "Do not mention financial analysis, strategy, or advisory framing. If the user greets you, greet back. "
+            "Keep the response short and human."
+        )
+        try:
+            answer = self._call_fast_llm(system_prompt, message)
+            return answer.strip() if answer.strip() else "Hello. How can I help?"
+        except Exception as exc:
+            print(f"[ProductionExpertModule] Casual response error: {exc}")
+            return "Hello. How can I help?"
+
+    def detect_financial_keywords(self, text: str) -> Dict[str, Any]:
+        """Keyword-only realtime detector for small rolling audio chunks."""
+        if not self.loaded:
+            self.warm()
+        probe = str(text or "").lower()
+        if not probe.strip():
+            return {"financial_detected": False, "matched_keywords": []}
+
+        matched: List[str] = []
+        tokens = set(re.findall(r"[a-zA-Z0-9_]+", probe))
+        for kw in self.financial_keywords:
+            key = kw.lower().strip()
+            if not key:
+                continue
+            if " " in key or any(ord(ch) > 127 for ch in key):
+                if key in probe:
+                    matched.append(kw)
+            else:
+                if key in tokens:
+                    matched.append(kw)
+
+        # Keep a compact unique list for badge rendering.
+        unique = []
+        seen = set()
+        for item in matched:
+            k = item.lower()
+            if k in seen:
+                continue
+            seen.add(k)
+            unique.append(item)
+
+        return {
+            "financial_detected": len(unique) > 0,
+            "matched_keywords": unique[:12],
+        }
+
+    def _language_breakdown(self, text: str, detected_lang: str) -> Dict[str, float]:
+        """Character-level language split: Devanagari -> Hindi, roman words -> English/Hinglish."""
+        financial_english_terms = {
+            "loan", "emi", "sip", "mutual", "fund", "insurance", "premium", "debt", "equity", "stock",
+            "return", "returns", "risk", "portfolio", "income", "expense", "budget", "credit", "score",
+            "cibil", "prepayment", "interest", "tenure", "corpus", "liquidity", "nps", "ppf", "elss",
+            "fd", "bond", "gold", "crypto", "property", "tax", "invest", "investment", "finance",
+        }
+        general_english_terms = {
+            "the", "is", "are", "was", "were", "my", "your", "our", "and", "or", "but", "if", "then",
+            "what", "how", "when", "where", "why", "can", "could", "should", "would", "please", "help",
+            "plan", "today", "tomorrow", "month", "year", "salary", "home", "car", "bank", "money",
+        }
+
+        hindi_chars = 0
+        english_chars = 0
+        hinglish_chars = 0
+
+        for ch in text:
+            code = ord(ch)
+            if 0x0900 <= code <= 0x097F:
+                hindi_chars += 1
+
+        latin_words = re.findall(r"[A-Za-z]+", text)
+        for word in latin_words:
+            token = word.lower()
+            if token in financial_english_terms or token in general_english_terms:
+                english_chars += len(word)
+            else:
+                hinglish_chars += len(word)
+
+        total = hindi_chars + english_chars + hinglish_chars
+        if total <= 0:
+            label = str(detected_lang).lower()
+            if "hi" in label or "hindi" in label:
+                return {"hindi": 100.0, "english": 0.0, "hinglish": 0.0}
+            if "en" in label or "english" in label:
+                return {"hindi": 0.0, "english": 100.0, "hinglish": 0.0}
+            return {"hindi": 0.0, "english": 0.0, "hinglish": 100.0}
+
+        h = round((hindi_chars / total) * 100, 2)
+        e = round((english_chars / total) * 100, 2)
+        hg = round((hinglish_chars / total) * 100, 2)
+        delta = round(100.0 - (h + e + hg), 2)
+
+        # Keep sums exactly 100 by absorbing rounding delta into the largest bucket.
+        if delta != 0:
+            buckets = {"hindi": h, "english": e, "hinglish": hg}
+            k = max(buckets, key=buckets.get)
+            buckets[k] = round(buckets[k] + delta, 2)
+            return buckets
+
+        return {"hindi": h, "english": e, "hinglish": hg}
 
     def process(self, text: str) -> Dict[str, Any]:
         """Run the full integrated pipeline with lazy loading."""
@@ -144,18 +418,39 @@ class ProductionExpertModule:
             lang_res = self.lang_pipe(safe_text, truncation=True)[0]
             detected_lang = lang_res["label"]
             language_confidence = float(lang_res.get("score", 0.0))
+            language_breakdown = self._language_breakdown(safe_text, detected_lang)
 
             # 2. Topic & Advice Logic
-            topic_res = self.topic_pipe(safe_text, candidate_labels=self.topics, multi_label=True, truncation=True)
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                f_l1 = pool.submit(
+                    self.topic_pipe,
+                    safe_text,
+                    candidate_labels=self.topic_level1_labels,
+                    multi_label=True,
+                    truncation=True,
+                )
+                f_l2 = pool.submit(
+                    self.topic_pipe,
+                    safe_text,
+                    candidate_labels=self.topic_level2_labels,
+                    multi_label=True,
+                    truncation=True,
+                )
+                topic_res_l1 = f_l1.result()
+                topic_res_l2 = f_l2.result()
+
             advice_res = self.topic_pipe(safe_text, candidate_labels=self.advice_labels, multi_label=False, truncation=True)
-            top_topic = topic_res["labels"][0]
-            confidence_score = round(topic_res["scores"][0], 2)
+            top_topic = topic_res_l1["labels"][0]
+            top_topic_score = float(topic_res_l1["scores"][0])
+            top_product = topic_res_l2["labels"][0]
+            top_product_score = float(topic_res_l2["scores"][0])
+            confidence_score = round(top_topic_score, 2)
             topic_top3 = [
                 {
-                    "topic": topic_res["labels"][i],
-                    "score": float(topic_res["scores"][i])
+                    "topic": topic_res_l1["labels"][i],
+                    "score": float(topic_res_l1["scores"][i])
                 }
-                for i in range(min(3, len(topic_res.get("labels", []))))
+                for i in range(min(3, len(topic_res_l1.get("labels", []))))
             ]
 
             # 3. FinBERT Sentiment/Urgency
@@ -180,37 +475,43 @@ class ProductionExpertModule:
             if self.gliner:
                 entities = self._gliner_safe(safe_text)
                 for ent in entities:
-                    label = ent["label"].replace(" ", "_").upper()
+                    score = float(ent.get("score", 0.0))
+                    if score <= 0.55:
+                        continue
+                    label = str(ent.get("label", "")).strip().upper()
+                    val = str(ent.get("text", "")).strip()
+                    if not label or not val:
+                        continue
                     ner_items.append({
-                        "type": label, 
-                        "value": ent["text"], 
-                        "context": "GLiNER Specialist",
-                        "confidence": float(ent.get("score", 0.0))
+                        "type": label,
+                        "value": val,
+                        "confidence": score,
+                        "source": "gliner",
                     })
 
-            # 5. Rule-based financial NLP for exact term, parameter, and topic detection
-            if config.FINANCIAL_NLP_ENABLE_RULES:
-                financial_nlp_result = self.financial_nlp.analyze(safe_text, detected_language=detected_lang)
-            else:
-                financial_nlp_result = FinancialNLPResult(
-                    detected_language=detected_lang,
-                    finance_topic=top_topic,
-                    topic_confidence=float(confidence_score),
-                    topic_scores=topic_top3,
-                    terms=[],
-                    entities=[],
-                    parameters={"amounts": [], "rates": [], "tenures": [], "dates": [], "institutions": [], "products": []},
-                    is_finance_related=top_topic != "general",
-                )
-            rule_entities = financial_nlp_result.entities
-            merged_entities = self._merge_entity_lists(ner_items, rule_entities)
+            # 5. Rule-based catcher for patterns GLiNER commonly misses.
+            rule_items = self._rule_based_entities(safe_text)
+
+            # Merge and deduplicate entities by (type, value) while keeping highest confidence.
+            merged: Dict[str, Dict[str, Any]] = {}
+            for item in ner_items + rule_items:
+                key = f"{item.get('type','')}::{str(item.get('value','')).lower()}"
+                existing = merged.get(key)
+                if not existing or float(item.get("confidence", 0.0)) > float(existing.get("confidence", 0.0)):
+                    merged[key] = item
+            ner_items = list(merged.values())
 
             model_attribution = {
                 "xlm_roberta": {
                     "detected_language": detected_lang,
                     "confidence": language_confidence,
+                    "language_breakdown": language_breakdown,
                 },
                 "deberta": {
+                    "level1_top_category": top_topic,
+                    "level1_confidence": top_topic_score,
+                    "level2_top_product": top_product,
+                    "level2_confidence": top_product_score,
                     "top_topic": top_topic,
                     "top3_topics": topic_top3,
                 },
@@ -235,7 +536,12 @@ class ProductionExpertModule:
             return {
                 "detected_language": detected_lang,
                 "language_confidence": language_confidence,
+                "language_breakdown": language_breakdown,
                 "topic": top_topic,
+                "topic_level1": top_topic,
+                "topic_level1_confidence": top_topic_score,
+                "topic_level2": top_product,
+                "topic_level2_confidence": top_product_score,
                 "confidence_score": confidence_score,
                 "topic_top3": topic_top3,
                 "financial_sentiment": sentiment_label,
@@ -248,6 +554,7 @@ class ProductionExpertModule:
                 "financial_nlp_topic_confidence": financial_nlp_result.topic_confidence,
                 "financial_nlp": financial_nlp_result.to_dict(),
                 "stt_engine": "Groq-Whisper (Primary)", # Metadata
+                "script_preserved": True,
                 "model_attribution": model_attribution,
             }
         except Exception as e:
