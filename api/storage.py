@@ -705,6 +705,41 @@ def clear_user_history(user_id: str) -> Dict[str, int]:
     return deleted
 
 
+
+def delete_thread_history(user_id: str, thread_id: str) -> bool:
+    """Delete all conversations in a specific thread for a user."""
+    try:
+        if _supabase_conversation_enabled():
+            try:
+                # Delete messages with this thread_id for this user
+                _supabase_request(
+                    "DELETE",
+                    f"/rest/v1/{SUPABASE_CONV_MESSAGES_TABLE}",
+                    params={
+                        "user_id": f"eq.{user_id}",
+                        "thread_id": f"eq.{thread_id}",
+                    },
+                )
+            except Exception as exc:
+                print(f"[Storage] Supabase delete thread messages failed: {exc}")
+
+        # Delete from local SQLite
+        db = SessionLocal()
+        try:
+            db.query(ConversationLog).filter(
+                ConversationLog.user_id == user_id,
+                ConversationLog.chat_thread_id == thread_id,
+            ).delete()
+            db.commit()
+        finally:
+            db.close()
+        
+        return True
+    except Exception as exc:
+        print(f"[Storage] Delete thread history failed: {exc}")
+        return False
+
+
 def get_all_conversations(user_id: str = "guest_001"):
     """Retrieve strategic history for a specific user from Supabase bridge; fallback to SQLite."""
     if _supabase_conversation_enabled():

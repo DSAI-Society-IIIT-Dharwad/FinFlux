@@ -37,6 +37,7 @@ from api.storage import (
     get_conversation_by_id,
     update_conversation as storage_update_conversation,
     clear_user_history,
+    delete_thread_history,
     SessionLocal,
     FinancialReminder,
 )
@@ -1131,6 +1132,24 @@ def thread_messages(thread_id: str, current_user: str = Depends(get_current_user
             "attached_result": item,
         })
     return {"thread_id": thread_id, "count": len(messages), "results": messages}
+
+
+@app.delete("/api/threads/{thread_id}")
+def delete_thread(thread_id: str, current_user: str = Depends(get_current_user)):
+    try:
+        if not thread_id or not current_user:
+            raise HTTPException(status_code=400, detail="thread_id and user_id are required")
+        
+        deleted = delete_thread_history(user_id=current_user, thread_id=thread_id)
+        return {
+            "status": "deleted",
+            "thread_id": thread_id,
+            "user_id": current_user,
+            "deleted": deleted,
+            "success": True,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete thread: {str(e)}")
 
 
 @app.get("/api/results")

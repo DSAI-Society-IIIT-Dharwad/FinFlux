@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, BarChart3, ChevronLeft, ChevronRight, Loader2, LogOut, MessageSquare, Mic, Pause, Play, Plus, Send, Settings, Shield, UserRound } from 'lucide-react';
+import { Copy, Mic, Pencil, RotateCcw, Shield } from 'lucide-react';
+import LandingPage from './pages/LandingPage.tsx';
+import TravelConnectSignin, { type TravelConnectAuthMode } from './components/ui/travel-connect-signin';
+import { AppSidebar } from './components/app-sidebar';
+import { SidebarProvider, SidebarTrigger } from './components/ui/sidebar';
+import { PromptBox } from './components/ui/chatgpt-prompt-input';
 
 type ViewMode = 'chat' | 'insights' | 'settings';
 
@@ -45,6 +50,7 @@ interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
+  conversationId?: string;
   attachedResult?: AnalysisResult;
 }
 
@@ -91,32 +97,30 @@ function encodeWavBlob(samples: Float32Array, sr: number): Blob {
 }
 
 function App() {
+  const [showLanding, setShowLanding] = useState(true);
   const [token, setToken] = useState<string>('');
   const [username, setUsername] = useState<string>('');
-  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
-  const [authUser, setAuthUser] = useState('');
-  const [authPass, setAuthPass] = useState('');
+  const [authMode, setAuthMode] = useState<TravelConnectAuthMode>('signin');
   const [authError, setAuthError] = useState('');
+  const [authNotice, setAuthNotice] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
 
   const [view, setView] = useState<ViewMode>('chat');
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [history, setHistory] = useState<AnalysisResult[]>([]);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [activeThreadId, setActiveThreadId] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
+  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isRecordPaused, setIsRecordPaused] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [recordingLevels, setRecordingLevels] = useState<number[]>(Array.from({ length: 28 }, () => 0.06));
   const [error, setError] = useState('');
-  const [voiceReplyOn] = useState(false);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [copiedMessageId, setCopiedMessageId] = useState('');
   const [editingConversationId, setEditingConversationId] = useState('');
-  const [editTranscript, setEditTranscript] = useState('');
-  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [voiceReplyOn] = useState(false);
   const [selectedInsightConversationId, setSelectedInsightConversationId] = useState('');
   const [selectedDetail, setSelectedDetail] = useState<AnalysisResult | null>(null);
   const [themeMode, setThemeMode] = useState<'auto' | 'dark' | 'light'>('auto');
@@ -132,6 +136,53 @@ function App() {
   const levelFrameRef = useRef<number | null>(null);
   const timerRef = useRef<number | null>(null);
   const pcmBufferRef = useRef<Float32Array[]>([]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty('--app-font-size', `${fontSizePx}px`);
+    root.style.setProperty('--app-text-color', textColor);
+    root.style.setProperty('--text-primary', textColor);
+  }, [fontSizePx, textColor]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+
+    const applyTheme = () => {
+      if (themeMode === 'auto') {
+        root.setAttribute('data-theme', media.matches ? 'dark' : 'light');
+      } else {
+        root.setAttribute('data-theme', themeMode);
+      }
+    };
+
+    applyTheme();
+
+    if (themeMode !== 'auto') return;
+
+    const onSystemThemeChange = () => applyTheme();
+    if (media.addEventListener) {
+      media.addEventListener('change', onSystemThemeChange);
+      return () => media.removeEventListener('change', onSystemThemeChange);
+    }
+
+    media.addListener(onSystemThemeChange);
+    return () => media.removeListener(onSystemThemeChange);
+  }, [themeMode]);
+
+  useEffect(() => {
+    if (error !== 'Recording canceled.') return;
+    const timeoutId = window.setTimeout(() => {
+      setError((prev) => (prev === 'Recording canceled.' ? '' : prev));
+    }, 2000);
+    return () => window.clearTimeout(timeoutId);
+  }, [error]);
+
+  useEffect(() => {
+    if (!token) return;
+    void loadHistory();
+    void loadThreads();
+  }, [token]);
 
   const authFetch = async (path: string, options: RequestInit = {}) => {
     const res = await fetch(`${API_BASE}${path}`, {
@@ -167,46 +218,11 @@ function App() {
       const data = await res.json();
       const rows: ThreadSummary[] = data.results || [];
       setThreads(rows);
-      if (!activeThreadId && rows.length > 0) {
-        await openHistoryThread(rows[0].thread_id);
-      }
+      // Don't auto-open any thread; user should see empty chat after login
     } catch (e) {
       setError(String(e));
     }
   };
-
-  useEffect(() => {
-    loadHistory();
-    loadThreads();
-  }, [token]);
-
-  useEffect(() => {
-    const root = document.documentElement;
-    const applyTheme = () => {
-      if (themeMode === 'auto') {
-        const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-        root.setAttribute('data-theme', isDark ? 'dark' : 'light');
-      } else {
-        root.setAttribute('data-theme', themeMode);
-      }
-    };
-    applyTheme();
-    if (themeMode === 'auto' && window.matchMedia) {
-      const mql = window.matchMedia('(prefers-color-scheme: dark)');
-      const listener = () => applyTheme();
-      mql.addEventListener('change', listener);
-      return () => mql.removeEventListener('change', listener);
-    }
-    return undefined;
-  }, [themeMode]);
-
-  useEffect(() => {
-    document.documentElement.style.setProperty('--app-font-size', `${fontSizePx}px`);
-  }, [fontSizePx]);
-
-  useEffect(() => {
-    document.documentElement.style.setProperty('--app-text-color', textColor);
-  }, [textColor]);
 
   const streamAssistantMessage = (messageId: string, fullText: string, attachedResult?: AnalysisResult) => new Promise<void>((resolve) => {
     let index = 0;
@@ -295,11 +311,12 @@ function App() {
     try {
       const res = await authFetch(`/api/threads/${threadId}/messages`);
       const data = await res.json();
-      const rows = (data.results || []) as Array<{ id: string; role: 'user' | 'assistant'; text: string; attached_result?: AnalysisResult }>;
+      const rows = (data.results || []) as Array<{ id: string; role: 'user' | 'assistant'; text: string; conversation_id?: string; attached_result?: AnalysisResult }>;
       setMessages(rows.map((r) => ({
         id: r.id,
         role: r.role,
         text: r.text,
+        conversationId: r.conversation_id,
         attachedResult: r.attached_result,
       })));
       const latestAnalysis = [...rows].reverse().find((r) => r.role === 'assistant' && r.attached_result)?.attached_result;
@@ -311,60 +328,125 @@ function App() {
     }
   };
 
-  const toggleExpanded = (messageId: string) => {
-    setExpanded((prev) => ({ ...prev, [messageId]: !prev[messageId] }));
+  const focusComposer = () => {
+    window.setTimeout(() => {
+      const textarea = document.querySelector('.prompt-textarea') as HTMLTextAreaElement | null;
+      textarea?.focus();
+      textarea?.setSelectionRange(textarea.value.length, textarea.value.length);
+    }, 0);
   };
 
-  const beginTranscriptEdit = (conversationId: string, transcript: string) => {
-    setEditingConversationId(conversationId);
-    setEditTranscript(transcript);
+  const getPromptByConversationId = (conversationId: string) => {
+    const match = [...messages].reverse().find((m) => m.role === 'user' && m.conversationId === conversationId);
+    return match?.text || '';
   };
 
-  const cancelTranscriptEdit = () => {
-    setEditingConversationId('');
-    setEditTranscript('');
-  };
-
-  const saveTranscriptEdit = async (conversationId: string) => {
-    if (!editTranscript.trim()) {
-      setError('Transcript cannot be empty.');
+  const startConversationEdit = (conversationId: string, fallbackPrompt = '') => {
+    const prompt = getPromptByConversationId(conversationId) || fallbackPrompt;
+    if (!prompt.trim()) {
+      setError('Original prompt not found for this summary.');
       return;
     }
-    setIsSavingEdit(true);
+    setEditingConversationId(conversationId);
+    setInput(prompt);
+    setView('chat');
+    setError('');
+    focusComposer();
+  };
+
+  const copyPrompt = async (messageId: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text || '');
+      setCopiedMessageId(messageId);
+      window.setTimeout(() => {
+        setCopiedMessageId((prev) => (prev === messageId ? '' : prev));
+      }, 1400);
+    } catch {
+      setError('Unable to copy prompt.');
+    }
+  };
+
+  const editPrompt = (text: string, conversationId?: string) => {
+    if (conversationId) {
+      startConversationEdit(conversationId, text);
+      return;
+    }
+    setInput(text || '');
+    setView('chat');
+    focusComposer();
+  };
+
+  const cancelConversationEdit = () => {
+    setEditingConversationId('');
+    setInput('');
+  };
+
+  const saveConversationEdit = async () => {
+    const transcript = input.trim();
+    if (!editingConversationId || !transcript || isSending || !token) return;
+
+    setIsSending(true);
     setError('');
     try {
-      const res = await authFetch(`/api/conversations/${conversationId}/transcript`, {
+      const res = await authFetch(`/api/conversations/${editingConversationId}/transcript`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript: editTranscript, reanalyze: true }),
+        body: JSON.stringify({ transcript, reanalyze: true }),
       });
       if (!res.ok) {
-        const body = await res.json().catch(() => ({ detail: 'Transcript update failed' }));
-        throw new Error(body.detail || 'Transcript update failed');
+        const body = await res.json().catch(() => ({ detail: 'Update failed' }));
+        throw new Error(body.detail || 'Update failed');
       }
-      cancelTranscriptEdit();
-      await loadHistory();
-      if (activeThreadId) await openHistoryThread(activeThreadId);
+
+      const payload = await res.json();
+      const updated = payload.conversation as AnalysisResult | undefined;
+      if (!updated) throw new Error('Invalid update response');
+
+      const updatedAssistantText = updated.executive_summary || 'Analysis complete.';
+      const updatedResult: AnalysisResult = { ...updated, response_mode: 'analysis' };
+
+      setMessages((prev) => prev.map((m) => {
+        if (m.conversationId !== editingConversationId) return m;
+        if (m.role === 'user') return { ...m, text: transcript };
+        if (m.role === 'assistant') {
+          return {
+            ...m,
+            text: updatedAssistantText,
+            attachedResult: updatedResult,
+          };
+        }
+        return m;
+      }));
+
       setSelectedDetail((prev) => {
-        if (!prev || prev.conversation_id !== conversationId) return prev;
-        return { ...prev, transcript: editTranscript };
+        if (!prev || prev.conversation_id !== editingConversationId) return prev;
+        return updatedResult;
       });
+
+      setInput('');
+      setEditingConversationId('');
+      await loadHistory();
+      await loadThreads();
     } catch (e) {
       setError(String(e));
     } finally {
-      setIsSavingEdit(false);
+      setIsSending(false);
     }
   };
 
-  const handleAuth = async () => {
+  const handleAuth = async (payload: { mode: TravelConnectAuthMode; email: string; username: string; password: string }) => {
     setAuthLoading(true);
     setAuthError('');
+    setAuthNotice('');
     try {
-      const endpoint = authMode === 'signin' ? '/api/auth/login' : '/api/auth/signup';
+      const endpoint = payload.mode === 'signin' ? '/api/auth/login' : '/api/auth/signup';
+      const requestBody = payload.mode === 'signin'
+        ? { username: payload.email.trim(), password: payload.password }
+        : { username: payload.email.trim(), display_name: payload.username.trim(), password: payload.password };
       const res = await fetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: authUser, password: authPass }),
+        body: JSON.stringify(requestBody),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: 'Auth failed' }));
@@ -372,27 +454,41 @@ function App() {
       }
       const data = await res.json();
       if (!data.access_token) {
-        setAuthError(data.message || 'Signup successful. Please verify your email, then sign in.');
+        setAuthNotice(data.message || 'Verification email sent. Confirm your email, then sign in.');
         setAuthMode('signin');
-        setAuthPass('');
         return;
       }
       setToken(data.access_token);
       setUsername(data.username);
-      setAuthPass('');
-      setAuthUser('');
+      setAuthError('');
+      setAuthNotice('');
       setView('chat');
     } catch (e) {
       setAuthError(String(e));
+      setAuthNotice('');
     } finally {
       setAuthLoading(false);
     }
   };
 
-  const handleAuthKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      void handleAuth();
+  const deleteThread = async (threadId: string) => {
+    if (!token) return;
+    try {
+      const res = await authFetch(`/api/threads/${threadId}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ detail: 'Delete failed' }));
+        throw new Error(body.detail || 'Failed to delete thread');
+      }
+      // Remove thread from list and clear view if it was active
+      setThreads((prev) => prev.filter((t) => t.thread_id !== threadId));
+      if (activeThreadId === threadId) {
+        setActiveThreadId('');
+        setMessages([]);
+        setSelectedDetail(null);
+        setView('chat');
+      }
+    } catch (e) {
+      setError(String(e));
     }
   };
 
@@ -403,7 +499,68 @@ function App() {
     setThreads([]);
     setMessages([]);
     setActiveThreadId('');
+    setEditingConversationId('');
+    setAuthError('');
+    setAuthNotice('');
   };
+
+  const insights = useMemo(() => {
+    const total = history.length;
+    const avgConfidence = total === 0 ? 0 : history.reduce((s, r) => s + (r.confidence_score || 0), 0) / total;
+    const avgLatency = total === 0 ? 0 : history.reduce((s, r) => s + (r.timing?.total_s || 0), 0) / total;
+
+    const riskMap: Record<string, number> = { LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 };
+    const sentimentMap: Record<string, number> = { positive: 0, neutral: 0, negative: 0 };
+    const topicMap: Record<string, number> = {};
+
+    for (const row of history) {
+      const risk = (row.risk_level || 'LOW').toUpperCase();
+      if (riskMap[risk] !== undefined) riskMap[risk] += 1;
+      const sent = (row.financial_sentiment || 'neutral').toLowerCase();
+      if (sent.includes('pos')) sentimentMap.positive += 1;
+      else if (sent.includes('neg')) sentimentMap.negative += 1;
+      else sentimentMap.neutral += 1;
+      const topic = (row.financial_topic || 'general').toLowerCase();
+      topicMap[topic] = (topicMap[topic] || 0) + 1;
+    }
+
+    const topTopics = Object.entries(topicMap)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5);
+
+    return { total, avgConfidence, avgLatency, riskMap, sentimentMap, topTopics };
+  }, [history]);
+
+  const selectedInsightConversation = useMemo(
+    () => history.find((h) => h.conversation_id === selectedInsightConversationId) || null,
+    [history, selectedInsightConversationId],
+  );
+
+  const basicExplainability = useMemo(() => {
+    if (!selectedDetail) return null;
+    const topEntities = (selectedDetail.entities || []).slice(0, 3).map((e) => `${e.type}: ${e.value}`);
+    const topicScores = (selectedDetail.topic_top3 || []).slice(0, 3).map((t) => `${t.topic} (${Math.round(t.score * 100)}%)`);
+    const sentiment = selectedDetail.sentiment_breakdown || {};
+    const quality = selectedDetail.quality_metrics || {};
+
+    return {
+      whatUserSaid: firstSentence(selectedDetail.transcript || 'No transcript available.'),
+      whyRisk: firstSentence(selectedDetail.risk_assessment || `Risk classified as ${selectedDetail.risk_level || 'LOW'} from detected obligations and intent signals.`),
+      evidence: topEntities.length > 0 ? topEntities : ['No strong entities extracted in this turn.'],
+      topicCandidates: topicScores.length > 0 ? topicScores : ['No ranked topic candidates available.'],
+      sentimentSummary: `Positive ${Math.round((sentiment.positive || 0) * 100)}%, Neutral ${Math.round((sentiment.neutral || 0) * 100)}%, Negative ${Math.round((sentiment.negative || 0) * 100)}%`,
+      nextWatch: firstSentence(selectedDetail.future_gearing || 'Track affordability and commitment follow-through in the next conversation.'),
+      languageLine: `${String(selectedDetail.language || 'unknown').toUpperCase()} (${Math.round((selectedDetail.language_confidence || quality.language_confidence || 0) * 100)}% confidence)`,
+    };
+  }, [selectedDetail]);
+
+  if (showLanding) {
+    return <LandingPage onGetStarted={() => {
+      setAuthMode('signin');
+      setShowLanding(false);
+      window.scrollTo(0, 0);
+    }} />;
+  }
 
   const createNewChat = () => {
     const newThreadId = `thr_${(crypto?.randomUUID?.() || Date.now().toString()).replace(/-/g, '').slice(0, 12)}`;
@@ -417,28 +574,7 @@ function App() {
   const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      void sendText();
-    }
-  };
-
-  const downloadPdfReport = async (conversationId: string) => {
-    try {
-      const res = await authFetch(`/api/report/${conversationId}?format=pdf`);
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ detail: 'PDF export failed' }));
-        throw new Error(body.detail || 'PDF export failed');
-      }
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `finflux_${conversationId}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
-    } catch (e) {
-      setError(String(e));
+      void handlePromptSubmit();
     }
   };
 
@@ -446,7 +582,8 @@ function App() {
     const text = input.trim();
     if (!text || !token || isSending) return;
 
-    const userMessage: ChatMessage = { id: `u-${Date.now()}`, role: 'user', text };
+    const userMessageId = `u-${Date.now()}`;
+    const userMessage: ChatMessage = { id: userMessageId, role: 'user', text };
     setMessages((prev) => [...prev, userMessage]);
     setInput('');
     setIsSending(true);
@@ -471,7 +608,9 @@ function App() {
         id: assistantId,
         role: 'assistant',
         text: '',
+        conversationId: data.conversation_id,
       };
+      setMessages((prev) => prev.map((m) => (m.id === userMessageId ? { ...m, conversationId: data.conversation_id } : m)));
       if (data.response_mode === 'analysis') {
         setMessages((prev) => [...prev, assistantMessage]);
         await streamAssistantMessage(assistantId, assistantText, data);
@@ -481,6 +620,61 @@ function App() {
       }
       if (voiceReplyOn) speak(assistantText, data);
       setActiveThreadId(data.chat_thread_id || activeThreadId);
+      await loadHistory();
+      await loadThreads();
+      setUploadedFiles([]);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const analyzeAudioFile = async (file: File, userLabel: string) => {
+    if (!token || isSending) return;
+
+    const userMessageId = `u-${Date.now()}`;
+    const userMessage: ChatMessage = { id: userMessageId, role: 'user', text: userLabel };
+    setMessages((prev) => [...prev, userMessage]);
+    setIsSending(true);
+    setError('');
+
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      if (activeThreadId) fd.append('thread_id', activeThreadId);
+      if (audioLanguage !== 'auto') fd.append('asr_language', audioLanguage);
+      const res = await authFetch('/api/analyze', { method: 'POST', body: fd });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ detail: 'Audio analyze failed' }));
+        throw new Error(body.detail || 'Audio analyze failed');
+      }
+      const data: AnalysisResult = await res.json();
+      const assistantId = `a-${Date.now()}`;
+      const assistantText = (data.response_mode && data.response_mode !== 'analysis')
+        ? (data.assistant_text || data.executive_summary || 'Done.')
+        : (data.executive_summary || 'Audio analysis complete.');
+      if (data.response_mode === 'analysis') {
+        setMessages((prev) => [...prev, {
+          id: assistantId,
+          role: 'assistant',
+          text: '',
+          conversationId: data.conversation_id,
+        }]);
+        setMessages((prev) => prev.map((m) => (m.id === userMessageId ? { ...m, conversationId: data.conversation_id } : m)));
+        await streamAssistantMessage(assistantId, assistantText, data);
+        setSelectedDetail(data);
+      } else {
+        setMessages((prev) => [...prev, {
+          id: assistantId,
+          role: 'assistant',
+          text: assistantText,
+          conversationId: data.conversation_id,
+        }]);
+        setMessages((prev) => prev.map((m) => (m.id === userMessageId ? { ...m, conversationId: data.conversation_id } : m)));
+      }
+      setActiveThreadId(data.chat_thread_id || activeThreadId);
+      if (voiceReplyOn) speak(assistantText, data);
       await loadHistory();
       await loadThreads();
     } catch (e) {
@@ -598,391 +792,206 @@ function App() {
     }
 
     const file = new File([encodeWavBlob(merged, 16000)], 'voice.wav', { type: 'audio/wav' });
-    const userMessage: ChatMessage = { id: `u-${Date.now()}`, role: 'user', text: 'Voice message sent' };
-    setMessages((prev) => [...prev, userMessage]);
-    setIsSending(true);
+    await analyzeAudioFile(file, 'Voice message sent');
+    setRecordingSeconds(0);
+  };
 
-    try {
-      const fd = new FormData();
-      fd.append('file', file);
-      if (activeThreadId) fd.append('thread_id', activeThreadId);
-      if (audioLanguage !== 'auto') fd.append('asr_language', audioLanguage);
-      const res = await authFetch('/api/analyze', { method: 'POST', body: fd });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ detail: 'Audio analyze failed' }));
-        throw new Error(body.detail || 'Audio analyze failed');
+  const handlePromptSubmit = async () => {
+    if (isRecording) return;
+
+    if (editingConversationId && input.trim()) {
+      await saveConversationEdit();
+      return;
+    }
+
+    if (input.trim()) {
+      await sendText();
+      return;
+    }
+
+    if (uploadedFiles.length > 0) {
+      const audioFile = uploadedFiles.find((file) => file.type.startsWith('audio/'));
+      if (!audioFile) {
+        setError('Only audio files are currently supported for direct file analysis.');
+        return;
       }
-      const data: AnalysisResult = await res.json();
-      const assistantId = `a-${Date.now()}`;
-      const assistantText = (data.response_mode && data.response_mode !== 'analysis')
-        ? (data.assistant_text || data.executive_summary || 'Done.')
-        : (data.executive_summary || 'Audio analysis complete.');
-      if (data.response_mode === 'analysis') {
-        setMessages((prev) => [...prev, {
-          id: assistantId,
-          role: 'assistant',
-          text: '',
-        }]);
-        await streamAssistantMessage(assistantId, assistantText, data);
-        setSelectedDetail(data);
-      } else {
-        setMessages((prev) => [...prev, {
-          id: assistantId,
-          role: 'assistant',
-          text: assistantText,
-        }]);
-      }
-      setActiveThreadId(data.chat_thread_id || activeThreadId);
-      if (voiceReplyOn) speak(assistantText, data);
-      await loadHistory();
-      await loadThreads();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setIsSending(false);
-      setRecordingSeconds(0);
+      await analyzeAudioFile(audioFile, `Uploaded audio: ${audioFile.name}`);
+      setUploadedFiles([]);
     }
   };
 
-  const insights = useMemo(() => {
-    const total = history.length;
-    const avgConfidence = total === 0 ? 0 : history.reduce((s, r) => s + (r.confidence_score || 0), 0) / total;
-    const avgLatency = total === 0 ? 0 : history.reduce((s, r) => s + (r.timing?.total_s || 0), 0) / total;
-
-    const riskMap: Record<string, number> = { LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 };
-    const sentimentMap: Record<string, number> = { positive: 0, neutral: 0, negative: 0 };
-    const topicMap: Record<string, number> = {};
-
-    for (const row of history) {
-      const risk = (row.risk_level || 'LOW').toUpperCase();
-      if (riskMap[risk] !== undefined) riskMap[risk] += 1;
-      const sent = (row.financial_sentiment || 'neutral').toLowerCase();
-      if (sent.includes('pos')) sentimentMap.positive += 1;
-      else if (sent.includes('neg')) sentimentMap.negative += 1;
-      else sentimentMap.neutral += 1;
-      const topic = (row.financial_topic || 'general').toLowerCase();
-      topicMap[topic] = (topicMap[topic] || 0) + 1;
-    }
-
-    const topTopics = Object.entries(topicMap)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5);
-
-    return { total, avgConfidence, avgLatency, riskMap, sentimentMap, topTopics };
-  }, [history]);
-
-  const selectedInsightConversation = useMemo(
-    () => history.find((h) => h.conversation_id === selectedInsightConversationId) || null,
-    [history, selectedInsightConversationId],
-  );
-
-  const basicExplainability = useMemo(() => {
-    if (!selectedDetail) return null;
-    const topEntities = (selectedDetail.entities || []).slice(0, 3).map((e) => `${e.type}: ${e.value}`);
-    const topicScores = (selectedDetail.topic_top3 || []).slice(0, 3).map((t) => `${t.topic} (${Math.round(t.score * 100)}%)`);
-    const sentiment = selectedDetail.sentiment_breakdown || {};
-    const quality = selectedDetail.quality_metrics || {};
-
-    return {
-      whatUserSaid: firstSentence(selectedDetail.transcript || 'No transcript available.'),
-      whyRisk: firstSentence(selectedDetail.risk_assessment || `Risk classified as ${selectedDetail.risk_level || 'LOW'} from detected obligations and intent signals.`),
-      evidence: topEntities.length > 0 ? topEntities : ['No strong entities extracted in this turn.'],
-      topicCandidates: topicScores.length > 0 ? topicScores : ['No ranked topic candidates available.'],
-      sentimentSummary: `Positive ${Math.round((sentiment.positive || 0) * 100)}%, Neutral ${Math.round((sentiment.neutral || 0) * 100)}%, Negative ${Math.round((sentiment.negative || 0) * 100)}%`,
-      nextWatch: firstSentence(selectedDetail.future_gearing || 'Track affordability and commitment follow-through in the next conversation.'),
-      languageLine: `${String(selectedDetail.language || 'unknown').toUpperCase()} (${Math.round((selectedDetail.language_confidence || quality.language_confidence || 0) * 100)}% confidence)`,
-    };
-  }, [selectedDetail]);
-
   if (!token) {
     return (
-      <div className="auth-shell">
-        <div className="auth-card">
-          <div className="auth-brand"><Activity size={20} /> FinFlux</div>
-          <h1>{authMode === 'signin' ? 'Sign In' : 'Create Account'}</h1>
-          <p>Secure financial intelligence workspace</p>
-
-          <input
-            placeholder="Email"
-            value={authUser}
-            onChange={(e) => setAuthUser(e.target.value)}
-            onKeyDown={handleAuthKeyDown}
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={authPass}
-            onChange={(e) => setAuthPass(e.target.value)}
-            onKeyDown={handleAuthKeyDown}
-          />
-
-          {authError && <div className="auth-error">{authError}</div>}
-
-          <button className="auth-btn" onClick={handleAuth} disabled={authLoading}>
-            {authLoading ? <Loader2 className="spin" size={16} /> : authMode === 'signin' ? 'Sign In' : 'Sign Up'}
-          </button>
-
-          <button className="auth-switch" onClick={() => setAuthMode((m) => (m === 'signin' ? 'signup' : 'signin'))}>
-            {authMode === 'signin' ? 'No account? Create one' : 'Already have an account? Sign in'}
-          </button>
-        </div>
-      </div>
+      <TravelConnectSignin
+        mode={authMode}
+        onModeChange={setAuthMode}
+        onSubmit={handleAuth}
+        loading={authLoading}
+        error={authError}
+        notice={authNotice}
+      />
     );
   }
 
   return (
-    <div className={`chat-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
-      <aside className="chat-sidebar">
-        <div className="sidebar-top">
-          <div className="brand-row">
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><Activity size={16} /> {!sidebarCollapsed ? 'FinFlux' : ''}</span>
-            <button className="collapse-btn" onClick={() => setSidebarCollapsed((v) => !v)}>
-              {sidebarCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
-            </button>
-          </div>
-          <button className="new-chat-btn" onClick={createNewChat}><Plus size={14} /> New Chat</button>
-          <button className={`side-tab ${view === 'chat' ? 'active' : ''}`} onClick={() => setView('chat')}><MessageSquare size={14} /> Current Chat</button>
-          <button className={`side-tab ${view === 'insights' ? 'active' : ''}`} onClick={() => setView('insights')}><BarChart3 size={14} /> Insights + Investments</button>
-          <button className={`side-tab ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}><Settings size={14} /> Settings</button>
-        </div>
+    <SidebarProvider>
+      <div className="chat-shell">
+        <AppSidebar
+          view={view}
+          onViewChange={setView}
+          onNewChat={createNewChat}
+          threads={threads}
+          activeThreadId={activeThreadId}
+          onOpenThread={openHistoryThread}
+          onDeleteThread={deleteThread}
+          username={username}
+          onSignOut={handleSignOut}
+        />
 
-        <div className="history-list">
-          {threads.map((item) => (
-            <button
-              key={item.thread_id}
-              className={`history-item ${activeThreadId === item.thread_id ? 'active' : ''}`}
-              onClick={() => openHistoryThread(item.thread_id)}
-            >
-              <div className="history-topic">History · {item.topic || 'General'} · {item.count}</div>
-              {!sidebarCollapsed && <div className="history-snippet">{(item.preview || '').slice(0, 70)}</div>}
-            </button>
-          ))}
+        <main className="chat-main">
+        <div className="chat-main-header">
+          <SidebarTrigger />
         </div>
-
-        <div className="sidebar-footer">
-          <div className="user-chip"><UserRound size={14} /> {!sidebarCollapsed ? username : ''}</div>
-          <button className="signout-btn" onClick={handleSignOut}><LogOut size={14} /> Sign out</button>
-        </div>
-      </aside>
-
-      <main className="chat-main">
         {view === 'chat' && (
-          <div className="chat-workspace">
-            <div className="chat-left-pane">
-              <div className="messages-wrap">
+          <>
+            <div className={`chat-workspace ${messages.length === 0 ? 'no-analysis' : ''}`}>
+              <div className="chat-left-pane">
+                <div className="messages-wrap">
               {messages.length === 0 && (
                 <div className="empty-state">
-                  <h2>How can I help with your financial call intelligence?</h2>
-                  <p>Type your query to generate transcript-based risk insights and summaries.</p>
+                  <h2>Record or upload a financial call to begin analysis.</h2>
+                  <p>FinFlux will transcribe call audio and generate risk, intent, and advisory insights.</p>
+                  <div className="empty-audio-cta">
+                    <button
+                      type="button"
+                      className="prompt-icon-btn prompt-mic-btn empty-mic-btn"
+                      onClick={startRecord}
+                      disabled={isSending || isRecording}
+                      title="Start first call recording"
+                      aria-label="Start first call recording"
+                    >
+                      <Mic size={100} />
+                    </button>
+                  </div>
                 </div>
               )}
               {messages.map((msg) => (
                 <div key={msg.id} className={`msg ${msg.role}`}>
                   <div className="msg-bubble" onClick={() => msg.attachedResult && setSelectedDetail(msg.attachedResult)}>
+                    {msg.role === 'assistant' && <p className="msg-label">Call Summary</p>}
                     <p>{msg.text}</p>
-                    {msg.attachedResult?.response_mode === 'analysis' && (
+                    {msg.role === 'user' && (
+                      <div className="msg-tools" onClick={(e) => e.stopPropagation()}>
+                        <button className="msg-tool-btn" onClick={() => void copyPrompt(msg.id, msg.text)} title="Copy prompt" aria-label="Copy prompt">
+                          <Copy size={13} />
+                          <span>{copiedMessageId === msg.id ? 'Copied' : 'Copy'}</span>
+                        </button>
+                        <button className="msg-tool-btn" onClick={() => editPrompt(msg.text, msg.conversationId)} title="Edit prompt" aria-label="Edit prompt">
+                          <Pencil size={13} />
+                          <span>Edit</span>
+                        </button>
+                      </div>
+                    )}
+                    {msg.role === 'assistant' && msg.attachedResult?.response_mode === 'analysis' && (
                       <>
-                        <div className="msg-metrics">
+                        <div className="msg-meta-line">
                           <span>Topic: {msg.attachedResult.financial_topic}</span>
                           <span>Risk: {msg.attachedResult.risk_level}</span>
-                          <span>Confidence: {Math.round((msg.attachedResult.confidence_score || 0) * 100)}%</span>
-                          <button className="details-toggle" onClick={() => toggleExpanded(msg.id)}>
-                            {expanded[msg.id] ? 'Hide details' : 'Show details'}
+                        </div>
+                        <div className="summary-actions" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            className="msg-tool-btn"
+                            onClick={() => startConversationEdit(msg.attachedResult!.conversation_id, msg.attachedResult!.transcript || '')}
+                            title="Re-run analysis"
+                            aria-label="Re-run analysis"
+                          >
+                            <RotateCcw size={13} />
+                            <span>Re-run Analysis</span>
                           </button>
                         </div>
-
-                        <div className="quick-transcript">
-                          <div className="quick-transcript-title">
-                            <span>Transcript</span>
-                            {editingConversationId !== msg.attachedResult.conversation_id && (
-                              <button
-                                className="details-toggle"
-                                onClick={() => beginTranscriptEdit(msg.attachedResult!.conversation_id, msg.attachedResult!.transcript || '')}
-                              >
-                                Edit + Regenerate Summary
-                              </button>
-                            )}
-                          </div>
-                          {editingConversationId === msg.attachedResult.conversation_id ? (
-                            <>
-                              <textarea
-                                className="transcript-editor"
-                                value={editTranscript}
-                                onChange={(e) => setEditTranscript(e.target.value)}
-                                rows={7}
-                              />
-                              <div className="transcript-actions">
-                                <button onClick={() => saveTranscriptEdit(msg.attachedResult!.conversation_id)} disabled={isSavingEdit}>
-                                  {isSavingEdit ? 'Saving...' : 'Save + Regenerate Summary'}
-                                </button>
-                                <button onClick={cancelTranscriptEdit}>Cancel</button>
-                              </div>
-                            </>
-                          ) : (
-                            <p className="quick-transcript-text">{msg.attachedResult.transcript || 'No transcript available.'}</p>
-                          )}
-                        </div>
-
-                        {expanded[msg.id] && (
-                          <div className="message-details">
-                            <div className="details-grid">
-                              <div className="detail-card">
-                                <h4>Strategic Intent</h4>
-                                <p>{msg.attachedResult.strategic_intent || 'N/A'}</p>
-                              </div>
-                              <div className="detail-card">
-                                <h4>Future Gearing</h4>
-                                <p>{msg.attachedResult.future_gearing || 'N/A'}</p>
-                              </div>
-                              <div className="detail-card">
-                                <h4>Risk Assessment</h4>
-                                <p>{msg.attachedResult.risk_assessment || 'N/A'}</p>
-                              </div>
-                              <div className="detail-card">
-                                <h4>Pipeline Latency</h4>
-                                <p>{(msg.attachedResult.timing?.total_s || 0).toFixed(2)}s</p>
-                              </div>
-                            </div>
-
-                            <div className="detail-wall">
-                              <h4>Qwen Wall of Logic</h4>
-                              <div className="wall-content">{msg.attachedResult.expert_reasoning_points || 'No reasoning available.'}</div>
-                            </div>
-                            <div className="detail-transcript">
-                              <div className="transcript-header">
-                                <h4>Report</h4>
-                                <button onClick={() => downloadPdfReport(msg.attachedResult!.conversation_id)}>Export PDF</button>
-                              </div>
-                              <p className="transcript-text">PDF includes full transcript, strategic analysis, and entity wall.</p>
-                            </div>
-                          </div>
-                        )}
                       </>
                     )}
                   </div>
                 </div>
               ))}
               {error && <div className="error-line">{error}</div>}
+                </div>
               </div>
+
+              {messages.length > 0 && (
+                <aside className="chat-right-pane">
+                  <h3>Call Analysis Details</h3>
+                  {!selectedDetail && <p className="detail-placeholder">Select an analysis response to view full risk, entities, and strategic context.</p>}
+                  {selectedDetail && (
+                    <div className="right-details-card">
+                      <div className="analysis-topic-block">
+                        <h4>Topic</h4>
+                        <p>{selectedDetail.financial_topic || 'N/A'}</p>
+                      </div>
+
+                      <div className="analysis-grid">
+                        <p><strong>Risk:</strong> {selectedDetail.risk_level || 'LOW'}</p>
+                        <p><strong>Confidence:</strong> {Math.round((selectedDetail.confidence_score || 0) * 100)}%</p>
+                        <p><strong>Sentiment:</strong> {selectedDetail.financial_sentiment || 'Neutral'}</p>
+                        <p><strong>Language:</strong> {String(selectedDetail.language || 'unknown').toUpperCase()}</p>
+                        <p><strong>Strategic Intent:</strong> {selectedDetail.strategic_intent || 'N/A'}</p>
+                        <p><strong>Future Gearing:</strong> {selectedDetail.future_gearing || 'N/A'}</p>
+                        <p><strong>Risk Assessment:</strong> {selectedDetail.risk_assessment || 'N/A'}</p>
+                        <p><strong>Pipeline Latency:</strong> {(selectedDetail.timing?.total_s || 0).toFixed(2)}s</p>
+                      </div>
+
+                      {basicExplainability && (
+                        <div className="explain-box">
+                          <h4>Basic Explainability</h4>
+                          <p><strong>What user said:</strong> {basicExplainability.whatUserSaid}</p>
+                          <p><strong>Why this risk:</strong> {basicExplainability.whyRisk}</p>
+                          <p><strong>Language:</strong> {basicExplainability.languageLine}</p>
+                          <p><strong>Topic candidates:</strong> {basicExplainability.topicCandidates.join(' | ')}</p>
+                          <p><strong>Entity evidence:</strong> {basicExplainability.evidence.join(' | ')}</p>
+                          <p><strong>Sentiment signal:</strong> {basicExplainability.sentimentSummary}</p>
+                          <p><strong>What to monitor next:</strong> {basicExplainability.nextWatch}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </aside>
+              )}
             </div>
 
             <div className="composer">
-              <div className="audio-first-panel">
-                <div className="audio-panel-head">
-                  <div>
-                    <div className="audio-title">Audio Recorder</div>
-                    <div className="audio-subtitle">Record in Hindi/English with live spikes, then send for analysis</div>
-                  </div>
-                  <div className="recording-time">{`${Math.floor(recordingSeconds / 60).toString().padStart(2, '0')}:${(recordingSeconds % 60).toString().padStart(2, '0')}`}</div>
-                </div>
-
-                <div className="spike-row" aria-hidden="true">
-                  {recordingLevels.map((lvl, i) => (
-                    <span key={i} className={`spike ${isRecording ? 'active' : ''}`} style={{ height: `${Math.max(10, Math.round(56 * lvl))}px` }} />
-                  ))}
-                </div>
-
-                <div className="audio-panel-actions">
-                  {!isRecording ? (
-                    <button className="audio-btn" onClick={startRecord} disabled={isSending}>
-                      <Mic size={16} /> Start
-                    </button>
-                  ) : (
-                    <>
-                      <button className="audio-btn" onClick={togglePauseRecord}>
-                        {isRecordPaused ? <Play size={16} /> : <Pause size={16} />} {isRecordPaused ? 'Resume' : 'Pause'}
-                      </button>
-                      <button className="audio-btn recording" onClick={stopRecord}>
-                        <Mic size={16} /> Send
-                      </button>
-                      <button className="audio-cancel-btn" onClick={cancelRecord}>Cancel</button>
-                    </>
-                  )}
-                  <select value={audioLanguage} onChange={(e) => setAudioLanguage(e.target.value as 'auto' | 'hi' | 'en')} className="audio-lang-select">
-                    <option value="auto">Audio Language: Auto</option>
-                    <option value="hi">Audio Language: Hindi</option>
-                    <option value="en">Audio Language: English</option>
-                  </select>
-                </div>
-              </div>
-
-              <textarea
-                placeholder="Ask FinFlux anything about this conversation..."
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={onComposerKeyDown}
-                rows={2}
-              />
-              <div className="composer-actions">
-                <button className="send-btn" onClick={sendText} disabled={isSending || !input.trim()}>
-                  {isSending ? <Loader2 className="spin" size={16} /> : <Send size={16} />} Send
-                </button>
-              </div>
-            </div>
-
-            <aside className="chat-right-pane">
-              <h3>Analysis Details</h3>
-              {!selectedDetail && <p className="detail-placeholder">Select an analysis response to view full risk, entities, and strategic context.</p>}
-              {selectedDetail && (
-                <div className="right-details-card">
-                  <div className="quick-transcript right-transcript">
-                    <div className="quick-transcript-title">
-                      <span>Full Transcript</span>
-                      {editingConversationId !== selectedDetail.conversation_id && (
-                        <button
-                          className="details-toggle"
-                          onClick={() => beginTranscriptEdit(selectedDetail.conversation_id, selectedDetail.transcript || '')}
-                        >
-                          Edit + Regenerate Summary
-                        </button>
-                      )}
-                    </div>
-                    {editingConversationId === selectedDetail.conversation_id ? (
-                      <>
-                        <textarea
-                          className="transcript-editor"
-                          value={editTranscript}
-                          onChange={(e) => setEditTranscript(e.target.value)}
-                          rows={8}
-                        />
-                        <div className="transcript-actions">
-                          <button onClick={() => saveTranscriptEdit(selectedDetail.conversation_id)} disabled={isSavingEdit}>
-                            {isSavingEdit ? 'Saving...' : 'Save + Regenerate Summary'}
-                          </button>
-                          <button onClick={cancelTranscriptEdit}>Cancel</button>
-                        </div>
-                      </>
-                    ) : (
-                      <p className="quick-transcript-text">{selectedDetail.transcript || 'No transcript available.'}</p>
-                    )}
-                  </div>
-
-                  <p><strong>Summary:</strong> {selectedDetail.executive_summary || 'N/A'}</p>
-                  <p><strong>Topic:</strong> {selectedDetail.financial_topic || 'N/A'}</p>
-                  <p><strong>Risk:</strong> {selectedDetail.risk_level || 'LOW'}</p>
-                  <p><strong>Confidence:</strong> {Math.round((selectedDetail.confidence_score || 0) * 100)}%</p>
-                  <p><strong>Sentiment:</strong> {selectedDetail.financial_sentiment || 'Neutral'}</p>
-                  <p><strong>Language:</strong> {String(selectedDetail.language || 'unknown').toUpperCase()}</p>
-                  <p><strong>Strategic Intent:</strong> {selectedDetail.strategic_intent || 'N/A'}</p>
-                  <p><strong>Future Gearing:</strong> {selectedDetail.future_gearing || 'N/A'}</p>
-                  <p><strong>Risk Assessment:</strong> {selectedDetail.risk_assessment || 'N/A'}</p>
-
-                  {basicExplainability && (
-                    <div className="explain-box">
-                      <h4>Basic Explainability</h4>
-                      <p><strong>What user said:</strong> {basicExplainability.whatUserSaid}</p>
-                      <p><strong>Why this risk:</strong> {basicExplainability.whyRisk}</p>
-                      <p><strong>Language:</strong> {basicExplainability.languageLine}</p>
-                      <p><strong>Topic candidates:</strong> {basicExplainability.topicCandidates.join(' | ')}</p>
-                      <p><strong>Entity evidence:</strong> {basicExplainability.evidence.join(' | ')}</p>
-                      <p><strong>Sentiment signal:</strong> {basicExplainability.sentimentSummary}</p>
-                      <p><strong>What to monitor next:</strong> {basicExplainability.nextWatch}</p>
-                    </div>
-                  )}
+              {editingConversationId && (
+                <div className="composer-edit-banner">
+                  <span>Editing this call transcript prompt. Submit to re-run analysis.</span>
+                  <button type="button" onClick={cancelConversationEdit}>Cancel edit</button>
                 </div>
               )}
-            </aside>
-          </div>
+              <PromptBox
+                value={input}
+                onChange={setInput}
+                onSubmit={() => void handlePromptSubmit()}
+                onKeyDown={onComposerKeyDown}
+                isSending={isSending}
+                isRecording={isRecording}
+                isRecordPaused={isRecordPaused}
+                recordingLevels={recordingLevels}
+                recordingSeconds={recordingSeconds}
+                audioLanguage={audioLanguage}
+                onAudioLanguageChange={setAudioLanguage}
+                onStartRecord={startRecord}
+                onTogglePauseRecord={togglePauseRecord}
+                onStopRecord={() => void stopRecord()}
+                onCancelRecord={cancelRecord}
+                files={uploadedFiles}
+                onPickFiles={(files) => {
+                  setUploadedFiles((prev) => [...prev, ...files]);
+                  setError('');
+                }}
+                onRemoveFile={(index) => {
+                  setUploadedFiles((prev) => prev.filter((_, i) => i !== index));
+                }}
+              />
+            </div>
+          </>
         )}
 
         {view === 'insights' && (
@@ -1116,8 +1125,9 @@ function App() {
             </div>
           </div>
         )}
-      </main>
-    </div>
+        </main>
+      </div>
+    </SidebarProvider>
   );
 }
 
