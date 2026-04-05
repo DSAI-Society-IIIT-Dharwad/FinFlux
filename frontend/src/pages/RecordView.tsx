@@ -1,19 +1,43 @@
 import { useState, useRef, useCallback } from 'react';
 import { Mic, Square, Loader2, Tag, ShieldAlert, Sparkles, TrendingUp, ShieldCheck, Download, Edit2, Save, FileText, CheckCircle } from 'lucide-react';
 
-interface Entity { type: string; value: string; context: string }
+type SpeechRecognitionCtor = new () => {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: any) => void) | null;
+  onerror: ((event: any) => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+
+interface Entity { type: string; value: string; context: string; confidence?: number }
+interface TopicScore { topic: string; score: number }
+interface SentimentBreakdown { positive?: number; neutral?: number; negative?: number }
+interface ModelAttribution {
+  xlm_roberta?: { detected_language?: string; confidence?: number };
+  deberta?: { top_topic?: string; top3_topics?: TopicScore[] };
+  finbert?: { label?: string; breakdown?: SentimentBreakdown };
+  gliner?: { entity_count?: number };
+  qwen?: { reasoning_available?: boolean; section?: string };
+}
+interface TimingData { total_s?: number; asr_s?: number; normalization_s?: number; expert_nlp_s?: number; synthesis_s?: number }
 interface AnalysisResult {
   conversation_id: string; timestamp: string; language: string;
   financial_topic: string; risk_level: string;
   advice_request: boolean; injection_attempt: boolean;
   entities: Entity[]; executive_summary: string; key_insights: string[];
-  confidence_score: number; timing: any;
+  confidence_score: number; timing: TimingData;
   financial_sentiment: string;
   expert_reasoning_points: string;
   future_gearing: string;
   strategic_intent: string;
   risk_assessment: string;
   transcript: string;
+  language_confidence?: number;
+  topic_top3?: TopicScore[];
+  sentiment_breakdown?: SentimentBreakdown;
+  model_attribution?: ModelAttribution;
 }
 
 function encodeWavBlob(samples: Float32Array, sr: number): Blob {
@@ -39,6 +63,8 @@ export default function RecordView() {
   const [recordingTime, setRecordingTime] = useState(0);
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [financialDetected, setFinancialDetected] = useState(false);
+  const [matchedKeywords, setMatchedKeywords] = useState<string[]>([]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -63,6 +89,9 @@ export default function RecordView() {
   const scriptNodeRef = useRef<ScriptProcessorNode | null>(null);
   const pcmBufferRef = useRef<Float32Array[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
+  const recognitionRef = useRef<any>(null);
+  const chunkDetectTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const chunkBufferRef = useRef<string>('');
 
   const drawWaveform = useCallback(() => {
     const c = canvasRef.current, a = analyserRef.current;
@@ -98,12 +127,64 @@ export default function RecordView() {
       setMode('recording'); setRecordingTime(0);
       timerRef.current = setInterval(() => setRecordingTime(t=>t+1), 1000);
       drawWaveform();
+
+      setFinancialDetected(false);
+      setMatchedKeywords([]);
+      chunkBufferRef.current = '';
+
+      const SR = ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition) as SpeechRecognitionCtor | undefined;
+      if (SR) {
+        const rec = new SR();
+        rec.continuous = true;
+        rec.interimResults = true;
+        rec.lang = 'en-IN';
+        rec.onresult = (event: any) => {
+          let chunk = '';
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            chunk += event.results[i][0].transcript || '';
+          }
+          if (chunk.trim()) {
+            chunkBufferRef.current = `${chunkBufferRef.current} ${chunk}`.trim();
+          }
+        };
+        rec.onerror = () => {
+          // Continue recording even if speech recognition fails.
+        };
+        recognitionRef.current = rec;
+        try { rec.start(); } catch {}
+      }
+
+      chunkDetectTimerRef.current = setInterval(async () => {
+        const textChunk = chunkBufferRef.current.trim();
+        chunkBufferRef.current = '';
+        if (!textChunk) return;
+        try {
+          const res = await fetch('http://localhost:8000/api/realtime/financial-detect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: textChunk }),
+          });
+          if (!res.ok) return;
+          const data = await res.json();
+          const detected = Boolean(data?.financial_detected);
+          const words = Array.isArray(data?.matched_keywords) ? data.matched_keywords : [];
+          setFinancialDetected(detected);
+          setMatchedKeywords(words.slice(0, 6));
+        } catch {
+          // Ignore transient errors for realtime indicator path.
+        }
+      }, 5000);
     } catch { setErrorMsg('Mic Error'); }
   };
 
   const stopRecord = async () => {
     cancelAnimationFrame(animFrameRef.current);
     if(timerRef.current) clearInterval(timerRef.current);
+    if(chunkDetectTimerRef.current) clearInterval(chunkDetectTimerRef.current);
+    if(recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch {}
+      recognitionRef.current = null;
+    }
     streamRef.current?.getTracks().forEach(t=>t.stop());
     scriptNodeRef.current?.disconnect();
     
@@ -113,7 +194,10 @@ export default function RecordView() {
     const wav = new File([encodeWavBlob(merged, 16000)], 'rec.wav', { type: 'audio/wav' });
     setMode('processing');
     
-    const fd = new FormData(); fd.append('file', wav);
+    const fd = new FormData(); 
+    fd.append('file', wav);
+    fd.append('user_id', 'guest_001'); // Mandatory tenant tag
+
     try {
         const res = await fetch('http://localhost:8000/api/analyze', { method: 'POST', body: fd });
         if(res.ok) { setResult(await res.json()); setMode('done'); } 
@@ -129,6 +213,9 @@ export default function RecordView() {
   };
 
   const rc = (l: string) => l === 'CRITICAL' ? '#ef4444' : l === 'HIGH' ? '#f97316' : l === 'MEDIUM' ? '#f59e0b' : '#10b981';
+  const pct = (value?: number) => `${Math.max(0, Math.min(100, Math.round((value ?? 0) * 100)))}%`;
+  const safeTopics = (result?.model_attribution?.deberta?.top3_topics || result?.topic_top3 || []);
+  const sentiment = result?.model_attribution?.finbert?.breakdown || result?.sentiment_breakdown || {};
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '32px', maxWidth: '1200px', margin: '0 auto', color: '#f8fafc' }}>
@@ -152,6 +239,19 @@ export default function RecordView() {
       {mode !== 'done' && (
         <div style={{ padding: '100px 60px', borderRadius: '40px', background: 'rgba(255,255,255,0.015)', border: '1px solid rgba(255,255,255,0.05)', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
           {mode === 'recording' && <canvas ref={canvasRef} width={800} height={120} style={{ position: 'absolute', bottom: 0, left: 0, width: '100%', opacity: 0.2 }} />}
+
+          {mode === 'recording' && (
+            <div style={{ position: 'absolute', top: '16px', right: '16px', display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <div style={{ padding: '8px 12px', borderRadius: '999px', border: `1px solid ${financialDetected ? 'rgba(16,185,129,0.45)' : 'rgba(148,163,184,0.35)'}`, background: financialDetected ? 'rgba(16,185,129,0.15)' : 'rgba(148,163,184,0.1)', color: financialDetected ? '#10b981' : '#94a3b8', fontSize: '0.72rem', fontWeight: 800, letterSpacing: '0.04em' }}>
+                {financialDetected ? 'FINANCIAL DETECTED' : 'LISTENING'}
+              </div>
+              {matchedKeywords.length > 0 && (
+                <div style={{ padding: '8px 12px', borderRadius: '999px', border: '1px solid rgba(59,130,246,0.35)', background: 'rgba(59,130,246,0.15)', color: '#93c5fd', fontSize: '0.72rem', fontWeight: 700, maxWidth: '340px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {matchedKeywords.join(', ')}
+                </div>
+              )}
+            </div>
+          )}
           
           <button onClick={mode === 'idle' ? startRecord : stopRecord} 
             style={{ width: '140px', height: '140px', borderRadius: '50%', border: 'none', background: mode === 'recording' ? '#ef4444' : '#3b82f6', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto', transition: 'all 0.4s cubic-bezier(0.4, 0, 0.2, 1)', transform: mode === 'recording' ? 'scale(1.15)' : 'scale(1)', boxShadow: mode === 'recording' ? '0 0 80px rgba(239,68,68,0.5)' : '0 0 80px rgba(59,130,246,0.2)' }}>
@@ -239,32 +339,31 @@ export default function RecordView() {
                   </div>
               </div>
 
-              {/* Advanced Reasoning Wall (Structured LLM-Style) */}
-              <div style={{ marginTop: '40px', padding: '32px', background: 'rgba(0,0,0,0.3)', borderRadius: '24px', border: '1px solid rgba(255,255,255,0.03)' }}>
-                  <h4 style={{ fontSize: '0.9rem', color: '#64748b', marginBottom: '20px', textTransform: 'uppercase', fontWeight: 900, letterSpacing: '0.1em', display: 'flex', alignItems: 'center', gap: '12px' }}><CheckCircle size={18} color="#10b981" /> Strategic Technical Wall (Qwen)</h4>
-                  <div style={{ borderLeft: '3px solid #10b981', paddingLeft: '24px' }}>
-                      {result.expert_reasoning_points
-                        .split('\n')
-                        .filter(line => line.trim())
-                        .map((line, i) => {
-                          const parts = line.split(/\*\*(.*?)\*\*/g);
-                          return (
-                            <p key={i} style={{ 
-                              fontSize: '1rem', 
-                              color: line.trim().startsWith('•') ? '#f1f5f9' : '#94a3b8', 
-                              lineHeight: 1.8, 
-                              marginBottom: '12px' 
-                            }}>
-                              {parts.map((part, j) => 
-                                j % 2 === 1 
-                                  ? <strong key={j} style={{ color: '#10b981', fontWeight: 700 }}>{part}</strong>
-                                  : part
-                              )}
-                            </p>
-                          );
-                        })
-                      }
-                  </div>
+              {/* Wall of Logic (Qwen) */}
+              <div style={{ marginTop: '40px', padding: '32px', background: 'linear-gradient(180deg, rgba(16,185,129,0.08) 0%, rgba(0,0,0,0.35) 100%)', borderRadius: '24px', border: '1px solid rgba(16,185,129,0.25)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                  <h4 style={{ fontSize: '0.9rem', color: '#10b981', textTransform: 'uppercase', fontWeight: 900, letterSpacing: '0.1em', display: 'flex', alignItems: 'center', gap: '12px' }}><CheckCircle size={18} color="#10b981" /> Wall of Logic (Qwen)</h4>
+                  <span style={{ fontSize: '0.72rem', fontWeight: 800, color: '#86efac', letterSpacing: '0.08em' }}>{result.model_attribution?.qwen?.reasoning_available ? 'ACTIVE' : 'DEGRADED'}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  {result.expert_reasoning_points
+                    .split('\n')
+                    .filter(line => line.trim())
+                    .map((line, i) => {
+                      const parts = line.split(/\*\*(.*?)\*\*/g);
+                      return (
+                        <div key={i} style={{ border: '1px solid rgba(255,255,255,0.05)', borderRadius: '14px', padding: '14px 16px', background: 'rgba(0,0,0,0.25)' }}>
+                          <p style={{ fontSize: '1rem', color: line.trim().startsWith('•') ? '#f1f5f9' : '#cbd5e1', lineHeight: 1.8, margin: 0 }}>
+                            {parts.map((part, j) =>
+                              j % 2 === 1
+                                ? <strong key={j} style={{ color: '#34d399', fontWeight: 800 }}>{part}</strong>
+                                : part
+                            )}
+                          </p>
+                        </div>
+                      );
+                    })}
+                </div>
               </div>
             </div>
 
@@ -284,6 +383,70 @@ export default function RecordView() {
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
+            {/* Model Attribution */}
+            <div className="glass-panel" style={{ padding: '28px', background: 'rgba(255,255,255,0.02)' }}>
+              <h4 style={{ marginBottom: '18px', display: 'flex', alignItems: 'center', gap: '10px', fontSize: '1rem', fontWeight: 900, color: '#38bdf8' }}>
+                <Sparkles size={18} /> Model Attribution
+              </h4>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+                <div style={{ padding: '14px', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(0,0,0,0.25)' }}>
+                  <div style={{ fontSize: '0.75rem', color: '#93c5fd', fontWeight: 800, letterSpacing: '0.07em' }}>XLM-ROBERTA · LANGUAGE DETECTION</div>
+                  <div style={{ marginTop: '8px', fontWeight: 700 }}>{result.model_attribution?.xlm_roberta?.detected_language || result.language}</div>
+                  <div style={{ marginTop: '8px', height: '8px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)' }}>
+                    <div style={{ width: pct(result.model_attribution?.xlm_roberta?.confidence ?? result.language_confidence), height: '100%', borderRadius: '999px', background: 'linear-gradient(90deg, #38bdf8, #3b82f6)' }} />
+                  </div>
+                  <div style={{ marginTop: '6px', fontSize: '0.75rem', color: '#93c5fd' }}>{pct(result.model_attribution?.xlm_roberta?.confidence ?? result.language_confidence)} confidence</div>
+                </div>
+
+                <div style={{ padding: '14px', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(0,0,0,0.25)' }}>
+                  <div style={{ fontSize: '0.75rem', color: '#fda4af', fontWeight: 800, letterSpacing: '0.07em' }}>DEBERTA · TOPIC CLASSIFICATION</div>
+                  <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {safeTopics.length === 0 ? (
+                      <div style={{ fontSize: '0.85rem', color: '#94a3b8' }}>No topic probabilities available.</div>
+                    ) : safeTopics.map((t, i) => (
+                      <div key={`${t.topic}-${i}`}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem' }}>
+                          <span style={{ color: '#f1f5f9', textTransform: 'capitalize' }}>{t.topic}</span>
+                          <span style={{ color: '#fda4af', fontWeight: 800 }}>{pct(t.score)}</span>
+                        </div>
+                        <div style={{ marginTop: '4px', height: '6px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)' }}>
+                          <div style={{ width: pct(t.score), height: '100%', borderRadius: '999px', background: 'linear-gradient(90deg, #fb7185, #f43f5e)' }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ padding: '14px', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(0,0,0,0.25)' }}>
+                  <div style={{ fontSize: '0.75rem', color: '#86efac', fontWeight: 800, letterSpacing: '0.07em' }}>FINBERT · SENTIMENT BREAKDOWN</div>
+                  <div style={{ marginTop: '10px', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
+                    {[
+                      { label: 'Positive', value: sentiment.positive ?? 0, color: '#22c55e' },
+                      { label: 'Neutral', value: sentiment.neutral ?? 0, color: '#f59e0b' },
+                      { label: 'Negative', value: sentiment.negative ?? 0, color: '#ef4444' },
+                    ].map((item) => (
+                      <div key={item.label} style={{ padding: '10px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.01)' }}>
+                        <div style={{ fontSize: '0.72rem', color: '#cbd5e1' }}>{item.label}</div>
+                        <div style={{ marginTop: '6px', fontWeight: 900, color: item.color }}>{pct(item.value)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ padding: '14px', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(0,0,0,0.25)' }}>
+                  <div style={{ fontSize: '0.75rem', color: '#c4b5fd', fontWeight: 800, letterSpacing: '0.07em' }}>GLINER · ENTITY EXTRACTION</div>
+                  <div style={{ marginTop: '10px', display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                    {result.entities.length === 0 ? <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>No entities found.</span> : result.entities.slice(0, 8).map((e, i) => (
+                      <span key={`${e.type}-${i}`} style={{ fontSize: '0.75rem', padding: '7px 10px', borderRadius: '999px', border: '1px solid rgba(196,181,253,0.3)', color: '#ddd6fe', background: 'rgba(168,85,247,0.1)' }}>
+                        {e.type}: {e.value}{e.confidence !== undefined ? ` (${pct(e.confidence)})` : ''}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
             {/* World-Class Risk Analysis */}
             <div className="glass-panel" style={{ padding: '40px', background: `linear-gradient(to bottom, ${rc(result.risk_level)}10, transparent)` }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '15px', marginBottom: '24px' }}>

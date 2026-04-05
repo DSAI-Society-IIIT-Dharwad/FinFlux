@@ -33,6 +33,27 @@
   
   --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
   --transition-normal: 300ms cubic-bezier(0.4, 0, 0.2, 1);
+  --app-font-size: 14px;
+  --app-text-color: #e2e8f0;
+}
+
+:root[data-theme='light'] {
+  --bg-primary: #f7fafc;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #eef2f7;
+
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+
+  --border-color: rgba(15, 23, 42, 0.12);
+  --border-highlight: rgba(37, 99, 235, 0.38);
+}
+
+:root[data-theme='dark'] {
+  --bg-primary: #0a0c10;
+  --bg-secondary: #13161c;
+  --bg-tertiary: #1c212a;
 }
 
 * {
@@ -52,6 +73,8 @@ body {
     radial-gradient(circle at 15% 50%, rgba(14, 165, 233, 0.04) 0%, transparent 50%),
     radial-gradient(circle at 85% 30%, rgba(59, 130, 246, 0.04) 0%, transparent 50%);
   min-height: 100vh;
+  font-size: var(--app-font-size);
+  color: var(--app-text-color);
 }
 
 h1, h2, h3, h4, h5, h6 {
@@ -319,6 +342,10 @@ input::placeholder, textarea::placeholder {
   min-height: 100vh;
 }
 
+.chat-shell.sidebar-collapsed {
+  grid-template-columns: 88px 1fr;
+}
+
 .chat-sidebar {
   border-right: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(11, 16, 24, 0.8);
@@ -342,6 +369,16 @@ input::placeholder, textarea::placeholder {
   border-radius: 10px;
   font-weight: 800;
   color: #e2e8f0;
+  justify-content: space-between;
+}
+
+.collapse-btn {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: #cbd5e1;
+  border-radius: 8px;
+  padding: 4px 6px;
+  cursor: pointer;
 }
 
 .new-chat-btn,
@@ -423,6 +460,84 @@ input::placeholder, textarea::placeholder {
   min-height: 100vh;
 }
 
+.chat-workspace {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  min-height: 0;
+}
+
+.chat-left-pane {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-right-pane {
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+  padding: 16px;
+  overflow: auto;
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.chat-right-pane h3 {
+  font-size: 14px;
+  color: #93c5fd;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.detail-placeholder {
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.right-details-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(10, 14, 20, 0.5);
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.right-speak {
+  width: fit-content;
+  margin-bottom: 4px;
+}
+
+.explain-box {
+  margin-top: 6px;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 10px;
+  background: rgba(56, 189, 248, 0.09);
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.explain-box h4 {
+  font-size: 12px;
+  color: #93c5fd;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.explain-box p {
+  color: #dbeafe;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.right-details-card p {
+  color: #e2e8f0;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
 .messages-wrap {
   flex: 1;
   overflow: auto;
@@ -461,6 +576,7 @@ input::placeholder, textarea::placeholder {
   border-radius: 14px;
   padding: 12px 14px;
   background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
 }
 
 .speak-btn {
@@ -705,6 +821,12 @@ input::placeholder, textarea::placeholder {
   display: flex;
   gap: 10px;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.audio-lang-select {
+  width: auto;
+  min-width: 200px;
 }
 
 .audio-cancel-btn {
@@ -779,6 +901,23 @@ input::placeholder, textarea::placeholder {
 
 .insights-wrap {
   padding: 24px;
+}
+
+.settings-grid {
+  margin-top: 16px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settings-grid label {
+  display: block;
+  margin-top: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: #93c5fd;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .insights-grid {
@@ -898,5 +1037,18 @@ input::placeholder, textarea::placeholder {
 
   .insights-grid {
     grid-template-columns: 1fr;
+  }
+
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-right-pane {
+    border-left: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
   }
 }

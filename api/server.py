@@ -5,9 +5,10 @@ import uuid
 import time
 import json
 import datetime
-import subprocess
 import requests
-from typing import Any, Dict
+import re
+from difflib import SequenceMatcher
+from typing import Any, Dict, List
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException, Body, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,9 +26,12 @@ sys.path.insert(0, str(ROOT_DIR / "src"))
 
 from finflux.modules.insight_engine.llm_adapters import ExpertSynthesisEngine
 from finflux.modules.insight_engine.financial_models import ProductionExpertModule
+from finflux import config as finflux_config
 from api.security import FinFluxSecurity
 from api.storage import (
     save_conversation,
+    save_quality_metrics,
+    get_quality_summary,
     get_all_conversations,
     search_memories,
     get_conversation_by_id,
@@ -62,6 +66,10 @@ class AuthPayload(BaseModel):
 class ChatPayload(BaseModel):
     text: str
     thread_id: str | None = None
+
+
+class RealtimeDetectPayload(BaseModel):
+    text: str
 
 
 def _require_supabase_auth_config() -> None:
@@ -101,51 +109,401 @@ def _supabase_get_user(access_token: str) -> Dict[str, Any]:
     return data
 
 
-def _prepare_audio_for_asr(raw_audio: bytes, call_id: str, original_filename: str | None) -> tuple[str, str | None]:
-    """Write upload to disk and convert to 16k mono WAV for ASR compatibility."""
-    suffix = Path(original_filename or "").suffix.lower()
-    if not suffix or len(suffix) > 10:
-        suffix = ".bin"
-
-    temp_input = f"tmp_{call_id}_src{suffix}"
-    temp_wav = f"tmp_{call_id}.wav"
-
-    with open(temp_input, "wb") as f:
-        f.write(raw_audio)
-
-    # If client already uploaded WAV, use it directly and avoid unnecessary transcoding.
-    if suffix == ".wav":
-        return temp_input, temp_input
-
-    ffmpeg_exe = None
-    try:
-        import imageio_ffmpeg  # type: ignore
-
-        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        ffmpeg_exe = None
-
-    if ffmpeg_exe:
-        try:
-            subprocess.run(
-                [ffmpeg_exe, "-y", "-i", temp_input, "-ar", "16000", "-ac", "1", temp_wav],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return temp_wav, temp_input
-        except Exception as e:
-            raise HTTPException(status_code=422, detail=f"Audio conversion failed: {e}")
-
-    raise HTTPException(
-        status_code=422,
-        detail="Uploaded audio requires ffmpeg conversion. Upload WAV or install ffmpeg support.",
-    )
-
-
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
     user = _supabase_get_user(credentials.credentials)
     return str(user.get("id"))
+
+
+RESET_PATTERNS = [
+    r"\b(start\s+fresh|fresh\s+start|new\s+chat|new\s+conversation|reset|ignore\s+previous|from\s+scratch)\b",
+    r"\b(naya\s+chat|nayi\s+baat|purana\s+ignore|reset\s+karo|shuru\s+se)\b",
+]
+GREETING_PATTERN = r"^(hi|hello|hey|namaste|namaskar|good\s+(morning|afternoon|evening)|hii+)\b"
+
+STOPWORDS = {
+    "a", "an", "the", "and", "or", "but", "if", "then", "to", "of", "in", "on", "for", "at", "by", "from",
+    "is", "are", "was", "were", "be", "been", "being", "this", "that", "these", "those", "it", "its", "as",
+    "i", "me", "my", "we", "our", "you", "your", "he", "she", "they", "them", "their", "with", "about", "into",
+    "have", "has", "had", "do", "does", "did", "will", "would", "can", "could", "should", "may", "might", "not",
+    "no", "yes", "also", "just", "very", "so", "than", "too", "up", "down", "over", "under", "again", "all",
+    "मैं", "मेरे", "मेरी", "है", "हैं", "था", "थे", "को", "से", "पर", "और", "या", "की", "का", "के", "में",
+}
+
+FINANCIAL_LEXICON = [
+    "emi", "equated monthly installment", "instalment", "loan", "home loan", "personal loan", "car loan", "education loan",
+    "gold loan", "business loan", "overdraft", "loan amount", "principal", "interest", "interest rate", "floating rate",
+    "fixed rate", "prepayment", "foreclosure", "tenure", "moratorium", "outstanding", "credit", "credit card", "minimum due",
+    "credit limit", "statement", "billing cycle", "late fee", "cibil", "credit score", "debt", "debt consolidation",
+    "liability", "repayment", "default", "penalty", "bounce", "salary", "income", "monthly income", "cashflow", "expense",
+    "expenses", "budget", "savings", "monthly savings", "surplus", "emergency fund", "buffer", "contingency", "liquidity",
+    "reserve", "corpus", "invest", "investment", "investing", "sip", "systematic investment plan", "lumpsum", "mutual fund",
+    "amc", "fund house", "folio", "nav", "equity", "debt fund", "hybrid fund", "index fund", "etf", "smallcap", "midcap",
+    "largecap", "diversification", "returns", "yield", "xirr", "cagr", "alpha", "beta", "volatility", "risk", "risk profile",
+    "asset allocation", "rebalancing", "fixed deposit", "fd", "recurring deposit", "rd", "bond", "debenture", "treasury", "gsec",
+    "ppf", "epf", "vpf", "nps", "elss", "ulip", "retirement", "pension", "annuity", "superannuation", "insurance",
+    "term insurance", "health insurance", "mediclaim", "premium", "sum assured", "coverage", "deductible", "claim", "tax",
+    "income tax", "tax saving", "section 80c", "section 80d", "section 87a", "hra", "tds", "capital gains", "gst", "itr",
+    "property", "real estate", "down payment", "registry", "stamp duty", "maintenance", "rent", "rental yield", "gold",
+    "sovereign gold bond", "sgb", "digital gold", "silver", "commodity", "crypto", "bitcoin", "ethereum", "bank", "bank account",
+    "savings account", "current account", "ifsc", "neft", "rtgs", "imps", "upi", "demat", "broker", "trading", "networth",
+    "wealth", "financial planning", "goal planning", "child education", "marriage fund", "house purchase", "vehicle purchase",
+    "inflation", "cost of living", "rupee", "rs", "inr", "lakh", "crore", "thousand", "k", "million", "billion", "किस्त",
+    "ब्याज", "बचत", "निवेश", "ऋण", "कर्ज", "आय", "खर्च", "बीमा", "प्रीमियम", "टैक्स", "म्यूचुअल फंड", "सिप", "एफडी",
+    "पीपीएफ", "एनपीएस", "क्रेडिट कार्ड", "होम लोन", "पर्सनल लोन", "डाउन पेमेंट", "जोखिम", "रिटर्न", "धन", "सम्पत्ति",
+    "संपत्ति", "बैंक", "इमरजेंसी फंड", "फाइनेंस", "वित्तीय", "रुपया",
+]
+
+
+def _tokenize_words(text: str) -> List[str]:
+    return re.findall(r"[\w\u0900-\u097F]+", str(text or "").lower())
+
+
+def _asr_confidence_from_verbose(asr_meta: Dict[str, Any] | None) -> float:
+    meta = asr_meta or {}
+    try:
+        raw = meta.get("asr_confidence", 0.85)
+        val = float(raw)
+        if 0.0 <= val <= 1.0:
+            return val
+    except Exception:
+        pass
+
+    segments = meta.get("segments", []) if isinstance(meta, dict) else []
+    probs: List[float] = []
+    if isinstance(segments, list):
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            words = seg.get("words", [])
+            if not isinstance(words, list):
+                continue
+            for w in words:
+                if not isinstance(w, dict):
+                    continue
+                try:
+                    p = float(w.get("probability"))
+                    if 0.0 <= p <= 1.0:
+                        probs.append(p)
+                except Exception:
+                    continue
+    if probs:
+        return float(sum(probs) / len(probs))
+    return 0.85
+
+
+def _ner_coverage_pct(transcript: str) -> float:
+    text = str(transcript or "").lower()
+    matched = 0
+    for term in FINANCIAL_LEXICON:
+        t = str(term).strip().lower()
+        if not t:
+            continue
+        if " " in t or any(ord(ch) > 127 for ch in t):
+            if t in text:
+                matched += 1
+        else:
+            if re.search(rf"\b{re.escape(t)}\b", text):
+                matched += 1
+    if not FINANCIAL_LEXICON:
+        return 0.0
+    return round((matched / len(FINANCIAL_LEXICON)) * 100.0, 2)
+
+
+def _rouge1_recall(summary: str, transcript: str) -> float:
+    s_words = {w for w in _tokenize_words(summary) if w not in STOPWORDS}
+    t_words = {w for w in _tokenize_words(transcript) if w not in STOPWORDS}
+    if not t_words:
+        return 0.0
+    inter = s_words.intersection(t_words)
+    return round(len(inter) / len(t_words), 4)
+
+
+def _contains_fuzzy(haystack: str, needle: str, threshold: float = 0.80) -> bool:
+    h = str(haystack or "").lower().strip()
+    n = str(needle or "").lower().strip()
+    if not h or not n:
+        return False
+    if n in h:
+        return True
+
+    if SequenceMatcher(None, n, h).ratio() >= threshold:
+        return True
+
+    # Character-window fuzzy substring check.
+    n_len = len(n)
+    if n_len == 0:
+        return False
+    step = max(1, n_len // 4)
+    for i in range(0, max(1, len(h) - n_len + 1), step):
+        chunk = h[i:i + n_len]
+        if SequenceMatcher(None, n, chunk).ratio() >= threshold:
+            return True
+    return False
+
+
+def _entity_alignment_pct(entities: List[Dict[str, Any]], summary: str, key_insights: List[str]) -> float:
+    if not entities:
+        return 0.0
+    target = " ".join([str(summary or "")] + [str(k) for k in (key_insights or [])])
+    aligned = 0
+    total = 0
+    for ent in entities:
+        if not isinstance(ent, dict):
+            continue
+        val = str(ent.get("value") or ent.get("text") or ent.get("entity") or "").strip()
+        if not val:
+            continue
+        total += 1
+        if _contains_fuzzy(target, val, threshold=0.80):
+            aligned += 1
+    if total == 0:
+        return 0.0
+    return round((aligned / total) * 100.0, 2)
+
+
+def _build_model_versions(input_mode: str) -> Dict[str, Any]:
+    whisper_model = finflux_config.GROQ_STT_MODEL if input_mode == "audio" else "none_text_input"
+    return {
+        "whisper": whisper_model,
+        "llm_synthesis": finflux_config.GROQ_LLM_MODEL,
+        "llm_reasoning": finflux_config.GROQ_LLM_REASON_MODEL,
+        "ner_model": finflux_config.HF_NER_FINANCIAL,
+        "sentiment_model": finflux_config.HF_FINBERT,
+        "language_model": finflux_config.HF_LANG_DETECT,
+    }
+
+
+def _compute_quality_metrics(
+    *,
+    transcript: str,
+    executive_summary: str,
+    key_insights: List[str],
+    entities: List[Dict[str, Any]],
+    language_confidence: float,
+    financial_relevance_score: float,
+    asr_meta: Dict[str, Any] | None,
+    input_mode: str,
+) -> Dict[str, Any]:
+    asr_conf = _asr_confidence_from_verbose(asr_meta)
+    ner_cov = _ner_coverage_pct(transcript)
+    rouge = _rouge1_recall(executive_summary, transcript)
+    ent_align = _entity_alignment_pct(entities, executive_summary, key_insights)
+    lang_conf = float(language_confidence or 0.0)
+    fin_rel = float(financial_relevance_score or 0.0)
+
+    overall = (
+        (asr_conf * 0.30)
+        + ((ner_cov / 100.0) * 0.20)
+        + (rouge * 0.20)
+        + ((ent_align / 100.0) * 0.15)
+        + (lang_conf * 0.10)
+        + (fin_rel * 0.05)
+    )
+    if overall > 0.82:
+        tier = "EXCELLENT"
+    elif overall > 0.65:
+        tier = "GOOD"
+    elif overall > 0.45:
+        tier = "ACCEPTABLE"
+    else:
+        tier = "LOW"
+
+    return {
+        "asr_confidence": round(asr_conf, 4),
+        "ner_coverage_pct": round(ner_cov, 2),
+        "rouge1_recall": round(rouge, 4),
+        "entity_alignment_pct": round(ent_align, 2),
+        "language_confidence": round(lang_conf, 4),
+        "financial_relevance_score": round(fin_rel, 4),
+        "overall_quality_score": round(overall, 4),
+        "quality_tier": tier,
+        "model_versions": _build_model_versions(input_mode),
+    }
+
+
+def _is_fresh_start_intent(clean_text: str, thread_id: str, history_rows: List[Dict[str, Any]], current_topic: str) -> bool:
+    text = clean_text.strip().lower()
+    same_thread = [
+        row for row in history_rows
+        if str(row.get("chat_thread_id") or row.get("conversation_id")) == thread_id
+    ]
+    is_new_thread = len(same_thread) == 0
+
+    if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in RESET_PATTERNS):
+        return True
+
+    words = re.findall(r"\w+", text)
+    is_opening_greeting = bool(re.search(GREETING_PATTERN, text)) and len(words) <= 10
+    if is_new_thread and is_opening_greeting:
+        return True
+
+    if is_new_thread and current_topic and current_topic != "N/A":
+        latest_any = history_rows[0] if history_rows else {}
+        prev_topic = str(latest_any.get("financial_topic") or "").strip()
+        if prev_topic and prev_topic != "N/A" and prev_topic.lower() != str(current_topic).lower():
+            return True
+
+    return False
+
+
+def _apply_optional_memory_filters(rows: List[Dict[str, Any]], filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Narrow semantic retrieval results with optional metadata filters; never block all results."""
+    if not rows or not filters:
+        return rows
+
+    def _parse_iso(ts: str) -> datetime.datetime | None:
+        text = str(ts or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    narrowed: List[Dict[str, Any]] = []
+    for row in rows:
+        row_topic = str(row.get("financial_topic", "")).strip().lower()
+        row_risk = str(row.get("risk_level") or row.get("risk") or "").strip().upper()
+        row_sentiment = str(row.get("financial_sentiment", "")).strip().capitalize()
+        row_dt = _parse_iso(str(row.get("timestamp", "")))
+
+        ok = True
+        f_topic = str(filters.get("financial_topic", "")).strip().lower()
+        if f_topic and f_topic not in row_topic:
+            ok = False
+
+        f_risk = str(filters.get("risk_level", "")).strip().upper()
+        if f_risk and f_risk != row_risk:
+            ok = False
+
+        f_sentiment = str(filters.get("financial_sentiment", "")).strip().capitalize()
+        if f_sentiment and f_sentiment != row_sentiment:
+            ok = False
+
+        start_s = str(filters.get("created_at_start", "")).strip()
+        if start_s and row_dt:
+            try:
+                start_dt = datetime.datetime.fromisoformat(start_s)
+                if row_dt.date() < start_dt.date():
+                    ok = False
+            except Exception:
+                pass
+
+        end_s = str(filters.get("created_at_end", "")).strip()
+        if end_s and row_dt:
+            try:
+                end_dt = datetime.datetime.fromisoformat(end_s)
+                if row_dt.date() > end_dt.date():
+                    ok = False
+            except Exception:
+                pass
+
+        if ok:
+            narrowed.append(row)
+
+    return narrowed if narrowed else rows
+
+
+def _parse_ts(ts: str) -> datetime.datetime | None:
+    text = str(ts or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=datetime.timezone.utc)
+        return parsed
+    except Exception:
+        return None
+
+
+def _history_product(row: Dict[str, Any]) -> str:
+    model_attr = row.get("model_attribution", {})
+    if isinstance(model_attr, dict):
+        deberta = model_attr.get("deberta", {})
+        if isinstance(deberta, dict):
+            p = str(deberta.get("level2_top_product", "")).strip().lower()
+            if p:
+                return p
+    return str(row.get("financial_topic", "")).strip().lower()
+
+
+def _generate_deterministic_reminders(history_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    reminders: List[Dict[str, Any]] = []
+    if not history_rows:
+        return reminders
+
+    # Rule 1: same product in 3+ conversations.
+    product_counts: Dict[str, int] = {}
+    for row in history_rows:
+        p = _history_product(row)
+        if not p or p == "n/a":
+            continue
+        product_counts[p] = product_counts.get(p, 0) + 1
+    for p, count in product_counts.items():
+        if count >= 3:
+            reminders.append(
+                {
+                    "reminder_type": "PRODUCT_PATTERN",
+                    "reminder_text": f"{p.replace('_', ' ')} has appeared in {count} conversations; schedule a focused follow-up review.",
+                    "urgency": "MEDIUM",
+                }
+            )
+
+    # Sort history by time asc for sequence checks.
+    ordered = sorted(history_rows, key=lambda r: str(r.get("timestamp", "")))
+
+    # Rule 2: DECISION commitment older than 7 days without FULFILLED marker.
+    now = datetime.datetime.now(datetime.timezone.utc)
+    fulfilled_marker = any(
+        "fulfilled" in str(r.get("executive_summary", "")).lower()
+        or "fulfilled" in str(r.get("transcript", "")).lower()
+        or "fulfilled" in str(r.get("raw_user_input", "")).lower()
+        for r in ordered
+    )
+    if not fulfilled_marker:
+        for r in ordered:
+            ts = _parse_ts(str(r.get("timestamp", "")))
+            if not ts:
+                continue
+            text_blob = " ".join(
+                [
+                    " ".join(r.get("key_points", [])) if isinstance(r.get("key_points"), list) else "",
+                    str(r.get("executive_summary", "")),
+                    str(r.get("risk_assessment", "")),
+                    str(r.get("strategic_intent", "")),
+                ]
+            ).lower()
+            if "decision" in text_blob and (now - ts).days > 7:
+                reminders.append(
+                    {
+                        "reminder_type": "COMMITMENT_PENDING",
+                        "reminder_text": "A prior decision-level commitment is older than 7 days and has no fulfilled marker; prompt execution check.",
+                        "urgency": "HIGH",
+                    }
+                )
+                break
+
+    # Rule 3: HIGH risk for 2 consecutive conversations.
+    consecutive_high = 0
+    for r in ordered:
+        risk = str(r.get("risk_level", "")).strip().upper()
+        if risk == "HIGH":
+            consecutive_high += 1
+            if consecutive_high >= 2:
+                reminders.append(
+                    {
+                        "reminder_type": "RISK_ALERT",
+                        "reminder_text": "Risk level has remained HIGH across consecutive conversations; immediate rebalancing review is recommended.",
+                        "urgency": "HIGH",
+                    }
+                )
+                break
+        else:
+            consecutive_high = 0
+
+    # Keep output concise and deterministic.
+    return reminders[:5]
 
 
 def _build_analysis_result(
@@ -157,58 +515,137 @@ def _build_analysis_result(
     t_start: float,
     thread_id: str,
     input_mode: str,
+    asr_meta: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     t_nlp_start = time.time()
     nlp_res = EXPERT.process(clean_text)
     t_nlp = time.time() - t_nlp_start
-    memory_context = ""
+    thread_history_context = ""
+    long_term_memory_context = ""
+    retrieval_spec = SYNTHESIS.decompose_retrieval_query(
+        user_message=clean_text,
+        detected_topic=str(nlp_res.get("topic") or ""),
+    )
+    semantic_query = str(retrieval_spec.get("semantic_query") or clean_text)
+    retrieval_filters = retrieval_spec.get("filters", {}) if isinstance(retrieval_spec, dict) else {}
+    history_rows: List[Dict[str, Any]] = []
     try:
-        mem_res = search_memories(user_id=user_id, query_text=clean_text, n_results=3)
-        result_rows = mem_res.get('results', []) if isinstance(mem_res, dict) else []
-        past_summaries = [
-            str(row.get('executive_summary', '')).strip()
-            for row in result_rows
-            if isinstance(row, dict) and str(row.get('executive_summary', '')).strip()
+        history_rows = get_all_conversations(user_id=user_id).get("results", [])
+        same_thread = [
+            row for row in history_rows
+            if str(row.get("chat_thread_id") or row.get("conversation_id")) == thread_id
         ]
-        if past_summaries:
-            memory_context = "\nLONG-TERM MEMORY (PAST CONTEXT):\n" + "\n".join([f"- {s}" for s in past_summaries])
+        same_thread = same_thread[:4]
+        is_fresh_start = _is_fresh_start_intent(
+            clean_text=clean_text,
+            thread_id=thread_id,
+            history_rows=history_rows,
+            current_topic=str(nlp_res.get("topic") or "N/A"),
+        )
+        thread_lines = []
+        for row in same_thread:
+            user_line = str(row.get("raw_user_input") or row.get("transcript") or "").strip()
+            assistant_line = str(row.get("executive_summary") or "").strip()
+            if user_line or assistant_line:
+                thread_lines.append(f"- User: {user_line}\n  Assistant: {assistant_line}")
+        if thread_lines:
+            thread_history_context = "\n".join(thread_lines)
+
+        # Fresh-start threads should not pull global historical memory.
+        if not is_fresh_start:
+            memory_rows: List[Dict[str, Any]] = []
+            thread_mem_res = search_memories(
+                user_id=user_id,
+                query_text=semantic_query,
+                filters={
+                    "thread_id": thread_id,
+                    "financial_topic": retrieval_filters.get("financial_topic", ""),
+                    "risk_level": retrieval_filters.get("risk_level", ""),
+                },
+                n_results=8,
+                min_similarity=0.72,
+            )
+            thread_rows = thread_mem_res.get("results", []) if isinstance(thread_mem_res, dict) else []
+            thread_rows = _apply_optional_memory_filters(thread_rows, retrieval_filters)
+
+            for row in thread_rows:
+                if not isinstance(row, dict):
+                    continue
+                summary = str(row.get("executive_summary", "")).strip()
+                if summary:
+                    memory_rows.append(row)
+
+            # Escalate to global only when thread context is sparse.
+            if len(same_thread) < 3:
+                mem_res = search_memories(
+                    user_id=user_id,
+                    query_text=semantic_query,
+                    filters={
+                        "financial_topic": retrieval_filters.get("financial_topic", ""),
+                        "risk_level": retrieval_filters.get("risk_level", ""),
+                    },
+                    n_results=8,
+                    min_similarity=0.72,
+                )
+                result_rows = mem_res.get("results", []) if isinstance(mem_res, dict) else []
+                result_rows = _apply_optional_memory_filters(result_rows, retrieval_filters)
+                for row in result_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    row_thread_id = str(row.get("thread_id") or "")
+                    if row_thread_id and row_thread_id == thread_id:
+                        continue
+                    summary = str(row.get("executive_summary", "")).strip()
+                    if summary and all(str(existing.get("executive_summary", "")).strip() != summary for existing in memory_rows):
+                        memory_rows.append(row)
+
+            if memory_rows:
+                long_term_memory_context = SYNTHESIS.build_memory_context(
+                    transcript=clean_text,
+                    memory_records=memory_rows,
+                    max_keep=3,
+                )
     except Exception:
-        memory_context = ""
+        thread_history_context = ""
+        long_term_memory_context = ""
 
     t_syn_start = time.time()
     analysis = SYNTHESIS.analyze(
         transcript=clean_text,
         entities=nlp_res.get("entities", []),
         fin_sentiment=nlp_res.get("financial_sentiment", "Neutral"),
-        memory_context=memory_context,
+        thread_history_context=thread_history_context,
+        long_term_memory_context=long_term_memory_context,
     )
+    future_insights = SYNTHESIS.generate_future_insights(
+        transcript=clean_text,
+        current_analysis={
+            **analysis,
+            "financial_topic": nlp_res.get("topic", "N/A"),
+        },
+        memory_context=long_term_memory_context,
+    )
+    reminders = _generate_deterministic_reminders(history_rows)
     t_syn = time.time() - t_syn_start
 
     injection_found = SECURITY.detect_injection(clean_text)
     exec_summary = analysis.get("executive_summary", "")
     safe_summary = SECURITY.mask_pii(exec_summary)
-    analysis_risk = str(analysis.get("risk_level", "")).upper()
-    nlp_risk = str(nlp_res.get("risk_level", "LOW")).upper()
-    resolved_risk = analysis_risk if analysis_risk in {"LOW", "MEDIUM", "HIGH", "CRITICAL"} else nlp_risk
-    model_attr = {
-        **nlp_res.get("model_attribution", {}),
-        "qwen": {
-            "reasoning_available": bool(analysis.get("expert_reasoning_points", "").strip()),
-            "section": "Wall of Logic",
-        },
-    }
-    if "nlp" not in model_attr:
-        model_attr["nlp"] = {
-            "topic_top3": nlp_res.get("topic_top3", []),
-            "sentiment_breakdown": nlp_res.get("sentiment_breakdown", {}),
-            "financial_parameters": nlp_res.get("financial_parameters", {}),
-            "recommendation_hints": nlp_res.get("recommendation_hints", []),
-            "language_mix": nlp_res.get("language_mix", {}),
-            "risk_score": nlp_res.get("risk_score", 0.0),
-            "risk_reasons": nlp_res.get("risk_reasons", []),
-        }
+    masked_key_insights = [SECURITY.mask_pii(p) for p in analysis.get("key_insights", [])]
+
+    quality_metrics = _compute_quality_metrics(
+        transcript=clean_text,
+        executive_summary=safe_summary,
+        key_insights=masked_key_insights,
+        entities=nlp_res.get("entities", []),
+        language_confidence=float(nlp_res.get("language_confidence", 0.0) or 0.0),
+        financial_relevance_score=float(nlp_res.get("confidence_score", 0.0) or 0.0),
+        asr_meta=asr_meta,
+        input_mode=input_mode,
+    )
 
     return {
+        "response_mode": "analysis",
         "conversation_id": f"call_{uuid.uuid4().hex[:8]}",
         "user_id": user_id,
         "chat_thread_id": thread_id,
@@ -217,28 +654,42 @@ def _build_analysis_result(
         "timestamp": str(datetime.datetime.utcnow()),
         "language": nlp_res.get("detected_language", "unknown"),
         "language_confidence": nlp_res.get("language_confidence", 0.0),
-        "language_mix": nlp_res.get("language_mix", {}),
         "financial_topic": nlp_res.get("topic", "N/A"),
         "topic_top3": nlp_res.get("topic_top3", []),
         "strategic_intent": analysis.get("strategic_intent", ""),
-        "risk_level": resolved_risk,
+        "risk_level": analysis.get("risk_level", "LOW"),
         "financial_sentiment": nlp_res.get("financial_sentiment", "Neutral"),
         "sentiment_breakdown": nlp_res.get("sentiment_breakdown", {}),
         "advice_request": nlp_res.get("is_advice_request", False) or SECURITY.is_asking_for_advice(clean_text),
         "injection_attempt": injection_found,
         "entities": nlp_res.get("entities", []),
-        "financial_parameters": nlp_res.get("financial_parameters", {}),
-        "recommendation_hints": nlp_res.get("recommendation_hints", []),
         "executive_summary": safe_summary,
         "summary": safe_summary,
         "future_gearing": analysis.get("future_gearing", ""),
+        "future_insights": future_insights,
+        "reminders": reminders,
+        "quality_metrics": quality_metrics,
         "risk_assessment": analysis.get("risk_assessment", ""),
-        "key_insights": [SECURITY.mask_pii(p) for p in analysis.get("key_insights", [])],
-        "key_points": [SECURITY.mask_pii(p) for p in analysis.get("key_insights", [])],
+        "key_insights": masked_key_insights,
+        "key_points": masked_key_insights,
         "transcript": clean_text,
         "expert_reasoning_points": analysis.get("expert_reasoning_points", ""),
         "expert_reasoning": analysis.get("expert_reasoning_points", ""),
-        "model_attribution": model_attr,
+        "model_attribution": {
+            **nlp_res.get("model_attribution", {}),
+            "response_mode": "analysis",
+            "retrieval_spec": {
+                "semantic_query": semantic_query,
+                "filters": retrieval_filters,
+            },
+            "future_insights": future_insights,
+            "reminders": reminders,
+            "quality_metrics": quality_metrics,
+            "qwen": {
+                "reasoning_available": bool(analysis.get("expert_reasoning_points", "").strip()),
+                "section": "Wall of Logic",
+            },
+        },
         "confidence_score": nlp_res.get("confidence_score", 0.0),
         "timing": {
             "asr_s": round(t_asr, 2),
@@ -248,6 +699,74 @@ def _build_analysis_result(
             "total_s": round(time.time() - t_start, 2),
         },
         "raw_asr_text": asr_text,
+    }
+
+
+def _dominant_language_from_breakdown(breakdown: Dict[str, Any]) -> str:
+    h = float(breakdown.get("hindi", 0.0))
+    e = float(breakdown.get("english", 0.0))
+    hg = float(breakdown.get("hinglish", 0.0))
+    if h > 60.0:
+        return "hindi"
+    if e > 60.0:
+        return "english"
+    if hg >= max(h, e):
+        return "hinglish"
+    return "hinglish"
+
+
+def _build_direct_response_result(
+    *,
+    user_id: str,
+    thread_id: str,
+    input_text: str,
+    assistant_text: str,
+    route: str,
+    route_label: str,
+    route_score: float,
+) -> Dict[str, Any]:
+    response_mode = "general_conversation" if route == "general" else "financial_inquiry"
+    safe_text = assistant_text.strip() or input_text.strip()
+    return {
+        "response_mode": response_mode,
+        "conversation_id": f"call_{uuid.uuid4().hex[:8]}",
+        "user_id": user_id,
+        "chat_thread_id": thread_id,
+        "input_mode": "text",
+        "raw_user_input": input_text,
+        "timestamp": str(datetime.datetime.utcnow()),
+        "language": "unknown",
+        "language_confidence": 0.0,
+        "financial_topic": "general",
+        "topic_top3": [],
+        "strategic_intent": "",
+        "risk_level": "LOW",
+        "financial_sentiment": "neutral",
+        "sentiment_breakdown": {"positive": 0.0, "neutral": 1.0, "negative": 0.0},
+        "advice_request": False,
+        "injection_attempt": False,
+        "entities": [],
+        "executive_summary": safe_text,
+        "summary": safe_text,
+        "assistant_text": safe_text,
+        "future_gearing": "",
+        "future_insights": [],
+        "reminders": [],
+        "quality_metrics": {},
+        "risk_assessment": "",
+        "key_insights": [],
+        "key_points": [],
+        "transcript": input_text,
+        "expert_reasoning_points": "",
+        "expert_reasoning": "",
+        "model_attribution": {
+            "response_mode": response_mode,
+            "route_label": route_label,
+            "route_score": route_score,
+        },
+        "confidence_score": route_score,
+        "timing": {"total_s": 0.0},
+        "raw_asr_text": input_text,
     }
 
 @app.post("/api/auth/signup")
@@ -322,6 +841,7 @@ def me(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
 async def analyze_audio(
     file: UploadFile = File(...),
     thread_id: str = Form(""),
+    asr_language: str = Form(""),
     current_user: str = Depends(get_current_user),
 ):
     """The 8-Stage Modular Pipeline V4.2."""
@@ -334,63 +854,125 @@ async def analyze_audio(
     encrypted_audio = SECURITY.encrypt_audio(raw_audio)
     with open(STORAGE_DIR / f"{call_id}.enc", "wb") as f: f.write(encrypted_audio)
 
-    # Temporary decoded WAV for ASR plus original upload copy for conversion.
-    temp_wav, temp_input = _prepare_audio_for_asr(raw_audio, call_id, file.filename)
+    # Temporary decrypted file for ASR
+    temp_wav = f"tmp_{call_id}.wav"
+    with open(temp_wav, "wb") as f: f.write(raw_audio)
 
     try:
         # ── Stage 1: Local-Cloud Hybrid ASR (Groq-Whisper with Local Fallback) ──
         try:
             from finflux.modules.insight_engine.llm_adapters import GroqWhisperAdapter
             whisper = GroqWhisperAdapter()
-            asr = whisper.transcribe(temp_wav)
+            lang_hint = asr_language.strip().lower()
+            if lang_hint not in {"hi", "en", "hindi", "english"}:
+                lang_hint = ""
+            asr = whisper.transcribe(temp_wav, language=lang_hint or None)
+            if not str(asr.get("text", "")).strip():
+                raise RuntimeError(str(asr.get("error", "empty_transcript")))
         except Exception as e:
             print(f"[API] Groq ASR Failed: {e}. Switching to Local Fallback...")
             local_text = EXPERT.transcribe_local(temp_wav)
-            asr = {"text": local_text, "language": "hindi" if local_text else "unknown"}
-
-        cloud_error = str(asr.get("error", "")).strip()
-        if cloud_error:
-            print(f"[API] Cloud ASR error: {cloud_error}")
+            asr = {"text": local_text, "language": "hindi" if local_text else "unknown", "asr_confidence": 0.85}
             
-        raw_text = str(asr.get("text", "")).strip()
-        if not raw_text:
-            print("[API] Empty cloud transcript. Trying local ASR fallback...")
-            local_text = str(EXPERT.transcribe_local(temp_wav) or "").strip()
-            if local_text:
-                raw_text = local_text
-            else:
-                raise HTTPException(status_code=422, detail="Could not transcribe audio. Please retry with clearer audio.")
+        raw_text = asr.get("text", "")
         t_asr = time.time() - t_start
 
         # ── Stage 2: Normalization (Llama 8B) ──
         t2_start = time.time()
-        clean_text = SYNTHESIS.normalize_transcript(raw_text)
+        pre_nlp = EXPERT.process(raw_text)
+        language_breakdown = pre_nlp.get("language_breakdown", {}) if isinstance(pre_nlp, dict) else {}
+        dominant_language = _dominant_language_from_breakdown(language_breakdown if isinstance(language_breakdown, dict) else {})
+        clean_text = SYNTHESIS.normalize_transcript(
+            raw_text,
+            dominant_language=dominant_language,
+            language_breakdown=language_breakdown if isinstance(language_breakdown, dict) else None,
+        )
         t_norm = time.time() - t2_start
 
-        result = _build_analysis_result(
-            clean_text=clean_text,
-            user_id=current_user,
-            asr_text=raw_text,
-            t_asr=t_asr,
-            t_norm=t_norm,
-            t_start=t_start,
-            thread_id=thread_id.strip() or f"thr_{uuid.uuid4().hex[:8]}",
-            input_mode="audio",
-        )
+        thread_value = thread_id.strip() or f"thr_{uuid.uuid4().hex[:8]}"
+        try:
+            route_info = EXPERT.route_intent(clean_text)
+            route = route_info.get("route", "financial_inquiry")
+            route_label = route_info.get("label", "financial information request")
+            route_score = float(route_info.get("score", 0.0))
+        except Exception as exc:
+            print(f"[Server] Audio route classification failed: {exc}")
+            route = "analysis"
+            route_label = "personal financial situation discussion"
+            route_score = 0.0
+
+        if route == "analysis":
+            result = _build_analysis_result(
+                clean_text=clean_text,
+                user_id=current_user,
+                asr_text=raw_text,
+                t_asr=t_asr,
+                t_norm=t_norm,
+                t_start=t_start,
+                thread_id=thread_value,
+                input_mode="audio",
+                asr_meta=asr,
+            )
+            result["language"] = pre_nlp.get("detected_language", result.get("language", "unknown"))
+            result["language_confidence"] = pre_nlp.get("language_confidence", result.get("language_confidence", 0.0))
+            result["language_breakdown"] = language_breakdown if isinstance(language_breakdown, dict) else {"hindi": 0.0, "english": 0.0, "hinglish": 0.0}
+            result["script_preserved"] = True
+            result.setdefault("model_attribution", {})
+            result["model_attribution"]["script_preserved"] = True
+            result["model_attribution"]["language_breakdown"] = result["language_breakdown"]
+        elif route == "general":
+            assistant_text = EXPERT.answer_casual(clean_text)
+            result = _build_direct_response_result(
+                user_id=current_user,
+                thread_id=thread_value,
+                input_text=clean_text,
+                assistant_text=assistant_text,
+                route=route,
+                route_label=route_label,
+                route_score=route_score,
+            )
+            result["input_mode"] = "audio"
+            result["raw_asr_text"] = raw_text
+            result["timing"]["asr_s"] = round(t_asr, 2)
+            result["timing"]["normalization_s"] = round(t_norm, 2)
+            result["language_breakdown"] = language_breakdown if isinstance(language_breakdown, dict) else {"hindi": 0.0, "english": 0.0, "hinglish": 0.0}
+            result["script_preserved"] = True
+        else:
+            assistant_text = EXPERT.answer_financial_inquiry(clean_text)
+            result = _build_direct_response_result(
+                user_id=current_user,
+                thread_id=thread_value,
+                input_text=clean_text,
+                assistant_text=assistant_text,
+                route=route,
+                route_label=route_label,
+                route_score=route_score,
+            )
+            result["input_mode"] = "audio"
+            result["raw_asr_text"] = raw_text
+            result["timing"]["asr_s"] = round(t_asr, 2)
+            result["timing"]["normalization_s"] = round(t_norm, 2)
+            result["language_breakdown"] = language_breakdown if isinstance(language_breakdown, dict) else {"hindi": 0.0, "english": 0.0, "hinglish": 0.0}
+            result["script_preserved"] = True
 
         # Save to Secure DB
         save_conversation(result)
+        if result.get("response_mode") == "analysis":
+            try:
+                save_quality_metrics(
+                    user_id=current_user,
+                    conversation_id=str(result.get("conversation_id", "")),
+                    metrics=result.get("quality_metrics", {}),
+                )
+            except Exception as exc:
+                print(f"[Server] Quality metrics save skipped: {exc}")
         return result
 
-    except HTTPException:
-        # Preserve explicit API errors (e.g., 400/422) instead of masking as 500.
-        raise
     except Exception as e:
         print(f"[Server] Pipeline crash: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(temp_wav): os.remove(temp_wav)
-        if temp_input and os.path.exists(temp_input): os.remove(temp_input)
 
 @app.get("/api/warm")
 def warm_models():
@@ -409,23 +991,95 @@ def chat(payload: ChatPayload, current_user: str = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
     t_start = time.time()
-    t_asr = 0.0
-    t2_start = time.time()
-    clean_text = SYNTHESIS.normalize_transcript(text)
-    t_norm = time.time() - t2_start
+    thread_id = (payload.thread_id or "").strip() or f"thr_{uuid.uuid4().hex[:8]}"
 
-    result = _build_analysis_result(
-        clean_text=clean_text,
-        user_id=current_user,
-        asr_text=text,
-        t_asr=t_asr,
-        t_norm=t_norm,
-        t_start=t_start,
-        thread_id=(payload.thread_id or "").strip() or f"thr_{uuid.uuid4().hex[:8]}",
-        input_mode="text",
-    )
+    try:
+        route_info = EXPERT.route_intent(text)
+        route = route_info.get("route", "financial_inquiry")
+        route_label = route_info.get("label", "financial information request")
+        route_score = float(route_info.get("score", 0.0))
+    except Exception as exc:
+        print(f"[Server] Route classification failed: {exc}")
+        route = "financial_inquiry"
+        route_label = "financial information request"
+        route_score = 0.0
+
+    if route == "analysis":
+        t_asr = 0.0
+        t2_start = time.time()
+        pre_nlp = EXPERT.process(text)
+        language_breakdown = pre_nlp.get("language_breakdown", {}) if isinstance(pre_nlp, dict) else {}
+        dominant_language = _dominant_language_from_breakdown(language_breakdown if isinstance(language_breakdown, dict) else {})
+        clean_text = SYNTHESIS.normalize_transcript(
+            text,
+            dominant_language=dominant_language,
+            language_breakdown=language_breakdown if isinstance(language_breakdown, dict) else None,
+        )
+        t_norm = time.time() - t2_start
+        result = _build_analysis_result(
+            clean_text=clean_text,
+            user_id=current_user,
+            asr_text=text,
+            t_asr=t_asr,
+            t_norm=t_norm,
+            t_start=t_start,
+            thread_id=thread_id,
+            input_mode="text",
+            asr_meta={"asr_confidence": 0.85},
+        )
+        result["language"] = pre_nlp.get("detected_language", result.get("language", "unknown"))
+        result["language_confidence"] = pre_nlp.get("language_confidence", result.get("language_confidence", 0.0))
+        result["language_breakdown"] = language_breakdown if isinstance(language_breakdown, dict) else {"hindi": 0.0, "english": 0.0, "hinglish": 0.0}
+        result["script_preserved"] = True
+        result.setdefault("model_attribution", {})
+        result["model_attribution"]["script_preserved"] = True
+        result["model_attribution"]["language_breakdown"] = result["language_breakdown"]
+    elif route == "general":
+        assistant_text = EXPERT.answer_casual(text)
+        result = _build_direct_response_result(
+            user_id=current_user,
+            thread_id=thread_id,
+            input_text=text,
+            assistant_text=assistant_text,
+            route=route,
+            route_label=route_label,
+            route_score=route_score,
+        )
+        pre_nlp = EXPERT.process(text)
+        result["language_breakdown"] = pre_nlp.get("language_breakdown", {"hindi": 0.0, "english": 0.0, "hinglish": 0.0})
+        result["script_preserved"] = True
+    else:
+        assistant_text = EXPERT.answer_financial_inquiry(text)
+        result = _build_direct_response_result(
+            user_id=current_user,
+            thread_id=thread_id,
+            input_text=text,
+            assistant_text=assistant_text,
+            route=route,
+            route_label=route_label,
+            route_score=route_score,
+        )
+        pre_nlp = EXPERT.process(text)
+        result["language_breakdown"] = pre_nlp.get("language_breakdown", {"hindi": 0.0, "english": 0.0, "hinglish": 0.0})
+        result["script_preserved"] = True
+
     save_conversation(result)
+    if result.get("response_mode") == "analysis":
+        try:
+            save_quality_metrics(
+                user_id=current_user,
+                conversation_id=str(result.get("conversation_id", "")),
+                metrics=result.get("quality_metrics", {}),
+            )
+        except Exception as exc:
+            print(f"[Server] Quality metrics save skipped: {exc}")
     return result
+
+
+@app.post("/api/realtime/financial-detect")
+def realtime_financial_detect(payload: RealtimeDetectPayload):
+    """Lightweight keyword detector for rolling 5-second recording chunks."""
+    return EXPERT.detect_financial_keywords(payload.text)
 
 
 @app.get("/api/threads")
@@ -483,6 +1137,11 @@ def thread_messages(thread_id: str, current_user: str = Depends(get_current_user
 def list_results(current_user: str = Depends(get_current_user)):
     return get_all_conversations(user_id=current_user)
 
+
+@app.get("/api/quality/summary")
+def quality_summary(current_user: str = Depends(get_current_user)):
+    return get_quality_summary(user_id=current_user)
+
 @app.put("/api/update/{conversation_id}")
 async def update_conversation_endpoint(conversation_id: str, payload: dict, current_user: str = Depends(get_current_user)):
     """Update stored conversation intelligence (e.g. edited transcript)."""
@@ -505,23 +1164,8 @@ async def update_conversation_endpoint(conversation_id: str, payload: dict, curr
 @app.get("/api/report/{conversation_id}")
 def generate_report(conversation_id: str, format: str = "pdf", current_user: str = Depends(get_current_user)):
     """Generate a high-fidelity financial analysis report isolated by user."""
-    # Prefer direct lookup to avoid edge cases when bridge history projections differ.
-    requested_id = str(conversation_id).strip().lower()
-    data = get_conversation_by_id(user_id=current_user, conversation_id=requested_id)
     history = get_all_conversations(user_id=current_user)
-    if not data:
-        data = next(
-            (
-                c
-                for c in history["results"]
-                if str(c.get("conversation_id", "")).strip().lower() == requested_id
-                or str(c.get("chat_thread_id", "")).strip().lower() == requested_id
-            ),
-            None,
-        )
-    # As a final guardrail, return latest user conversation instead of hard 404 when user has history.
-    if not data and history.get("results"):
-        data = history["results"][0]
+    data = next((c for c in history["results"] if c["conversation_id"] == conversation_id), None)
     if not data: raise HTTPException(status_code=404, detail="Analysis not found")
 
     if format == "csv":
@@ -537,7 +1181,7 @@ def generate_report(conversation_id: str, format: str = "pdf", current_user: str
     from reportlab.lib.pagesizes import LETTER
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, HRFlowable
     from reportlab.lib.units import inch
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
@@ -560,6 +1204,7 @@ def generate_report(conversation_id: str, format: str = "pdf", current_user: str
     header_style = ParagraphStyle('HeaderStyle', parent=styles['Heading2'], fontSize=14, textColor=colors.HexColor("#1e40af"), spaceBefore=18, spaceAfter=8, fontName=f"{font_name}-Bold" if font_name == "Helvetica" else font_name, borderLeftIndent=12, leftIndent=12)
     body_style = ParagraphStyle('BodyStyle', parent=styles['BodyText'], fontSize=11, leading=16, spaceAfter=12, fontName=font_name)
     meta_style = ParagraphStyle('MetaStyle', parent=styles['BodyText'], fontSize=9, textColor=colors.grey, fontName=font_name)
+    transcript_style = ParagraphStyle('TranscriptStyle', parent=styles['BodyText'], fontSize=9, leading=14, textColor=colors.darkslategrey, leftIndent=12, fontName=font_name)
 
     story = []
 
@@ -631,6 +1276,15 @@ def generate_report(conversation_id: str, format: str = "pdf", current_user: str
             if line.strip():
                 clean_line = line.replace('• ', '').replace('**', '')
                 story.append(Paragraph(f"• {clean_line}", body_style))
+    
+    # 7. Transcript (New Page)
+    story.append(PageBreak())
+    story.append(Paragraph("VERIFIED TRANSCRIPT RECORD", header_style))
+    transcript = data.get("transcript", "")
+    for part in transcript.split('\n\n'):
+        if part.strip():
+            story.append(Paragraph(part, transcript_style))
+            story.append(Spacer(1, 0.1*inch))
 
     doc.build(story)
     buffer.seek(0)

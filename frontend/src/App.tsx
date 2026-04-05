@@ -1,35 +1,43 @@
-﻿import { useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, BarChart3, Loader2, LogOut, MessageSquare, Mic, Plus, Send, UserRound, Volume2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Activity, BarChart3, ChevronLeft, ChevronRight, Loader2, LogOut, MessageSquare, Mic, Pause, Play, Plus, Send, Settings, Shield, UserRound, Volume2 } from 'lucide-react';
 
-type ViewMode = 'chat' | 'insights';
+type ViewMode = 'chat' | 'insights' | 'settings';
 
 interface TopicScore { topic: string; score: number }
 interface SentimentBreakdown { positive?: number; neutral?: number; negative?: number }
 interface Entity { type: string; value: string; confidence?: number }
-interface LanguageMix {
-  hindi_pct?: number;
-  english_pct?: number;
-  other_pct?: number;
-  dominant_language?: string;
+interface QualityMetrics {
+  asr_confidence?: number;
+  ner_coverage_pct?: number;
+  rouge1_recall?: number;
+  entity_alignment_pct?: number;
+  language_confidence?: number;
+  financial_relevance_score?: number;
+  overall_quality_score?: number;
+  quality_tier?: string;
 }
 interface AnalysisResult {
   conversation_id: string;
   chat_thread_id?: string;
+  response_mode?: 'analysis' | 'financial_inquiry' | 'general_conversation';
   timestamp: string;
+  language?: string;
+  language_confidence?: number;
   financial_topic: string;
   risk_level: string;
   financial_sentiment: string;
   confidence_score: number;
   executive_summary: string;
   transcript: string;
+  assistant_text?: string;
   strategic_intent?: string;
   future_gearing?: string;
   risk_assessment?: string;
   expert_reasoning_points?: string;
   timing?: { total_s?: number };
-  language_mix?: LanguageMix;
   topic_top3?: TopicScore[];
   sentiment_breakdown?: SentimentBreakdown;
+  quality_metrics?: QualityMetrics;
   entities: Entity[];
 }
 
@@ -50,17 +58,6 @@ interface ThreadSummary {
 }
 
 const API_BASE = 'http://localhost:8000';
-
-function formatLanguageMix(mix?: LanguageMix): string {
-  if (!mix) return 'Language mix unavailable';
-  const hindi = Number(mix.hindi_pct || 0).toFixed(1);
-  const english = Number(mix.english_pct || 0).toFixed(1);
-  const other = Number(mix.other_pct || 0).toFixed(1);
-  if (Number(other) >= 0.5) {
-    return `Hindi ${hindi}% | English ${english}% | Other ${other}%`;
-  }
-  return `Hindi ${hindi}% | English ${english}%`;
-}
 
 function encodeWavBlob(samples: Float32Array, sr: number): Blob {
   const bps = 16;
@@ -103,6 +100,7 @@ function App() {
   const [authLoading, setAuthLoading] = useState(false);
 
   const [view, setView] = useState<ViewMode>('chat');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [history, setHistory] = useState<AnalysisResult[]>([]);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [activeThreadId, setActiveThreadId] = useState('');
@@ -110,6 +108,7 @@ function App() {
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [isRecordPaused, setIsRecordPaused] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [recordingLevels, setRecordingLevels] = useState<number[]>(Array.from({ length: 28 }, () => 0.06));
   const [error, setError] = useState('');
@@ -119,6 +118,12 @@ function App() {
   const [editTranscript, setEditTranscript] = useState('');
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [selectedInsightConversationId, setSelectedInsightConversationId] = useState('');
+  const [selectedDetail, setSelectedDetail] = useState<AnalysisResult | null>(null);
+  const [themeMode, setThemeMode] = useState<'auto' | 'dark' | 'light'>('auto');
+  const [fontSizePx, setFontSizePx] = useState<number>(14);
+  const [textColor, setTextColor] = useState<string>('#e2e8f0');
+  const [audioLanguage, setAudioLanguage] = useState<'auto' | 'hi' | 'en'>('auto');
+  const [ttsVoiceProfile, setTtsVoiceProfile] = useState<'auto' | 'female' | 'male'>('auto');
 
   const streamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -175,6 +180,34 @@ function App() {
     loadThreads();
   }, [token]);
 
+  useEffect(() => {
+    const root = document.documentElement;
+    const applyTheme = () => {
+      if (themeMode === 'auto') {
+        const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        root.setAttribute('data-theme', isDark ? 'dark' : 'light');
+      } else {
+        root.setAttribute('data-theme', themeMode);
+      }
+    };
+    applyTheme();
+    if (themeMode === 'auto' && window.matchMedia) {
+      const mql = window.matchMedia('(prefers-color-scheme: dark)');
+      const listener = () => applyTheme();
+      mql.addEventListener('change', listener);
+      return () => mql.removeEventListener('change', listener);
+    }
+    return undefined;
+  }, [themeMode]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty('--app-font-size', `${fontSizePx}px`);
+  }, [fontSizePx]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty('--app-text-color', textColor);
+  }, [textColor]);
+
   const streamAssistantMessage = (messageId: string, fullText: string, attachedResult?: AnalysisResult) => new Promise<void>((resolve) => {
     let index = 0;
     const tick = () => {
@@ -190,12 +223,71 @@ function App() {
     tick();
   });
 
-  const speak = (text: string) => {
+  const detectSpeakLanguage = (result?: AnalysisResult): 'hi-IN' | 'en-IN' => {
+    const lang = String(result?.language || '').toLowerCase();
+    if (lang.startsWith('hi') || lang.includes('hindi')) return 'hi-IN';
+    return 'en-IN';
+  };
+
+  const normalizeSpeechText = (text: string): string => {
+    const src = String(text || '').trim();
+    if (!src) return '';
+    return src
+      .replace(/₹\s?([0-9][0-9,]*)/g, '$1 rupees')
+      .replace(/INR\s?([0-9][0-9,]*)/gi, '$1 rupees')
+      .replace(/\b([0-9]{1,3}(?:,[0-9]{3})+)\b/g, (_, g1) => String(g1).replace(/,/g, ' '))
+      .replace(/\s+/g, ' ')
+      .trim();
+  };
+
+  const firstSentence = (text: string): string => {
+    const t = String(text || '').trim();
+    if (!t) return '';
+    const m = t.match(/^[^.!?]+[.!?]?/);
+    return m ? m[0].trim() : t;
+  };
+
+  const buildSpeakSummary = (text: string, result?: AnalysisResult): string => {
+    if (!result || result.response_mode !== 'analysis') {
+      return normalizeSpeechText(text);
+    }
+    const summary = firstSentence(result.executive_summary || text || '');
+    const risk = (result.risk_level || 'LOW').toUpperCase();
+    const topic = result.financial_topic || 'financial discussion';
+    const next = firstSentence(result.future_gearing || 'Monitor cash flow and commitment follow-through.');
+    return normalizeSpeechText(`Quick insight: Topic is ${topic}. Risk is ${risk}. ${summary} Next: ${next}`);
+  };
+
+  const pickVoice = (langTag: 'hi-IN' | 'en-IN') => {
+    if (!('speechSynthesis' in window)) return null;
+    const voices = window.speechSynthesis.getVoices();
+    if (!voices || voices.length === 0) return null;
+
+    const primary = voices.filter((v) => v.lang?.toLowerCase().startsWith(langTag.slice(0, 2).toLowerCase()));
+    const pool = primary.length > 0 ? primary : voices;
+
+    if (ttsVoiceProfile === 'female') {
+      const female = pool.find((v) => /female|zira|susan|aria|heera|veena|siri/i.test(v.name));
+      if (female) return female;
+    }
+    if (ttsVoiceProfile === 'male') {
+      const male = pool.find((v) => /male|david|mark|alex|ravi|rahul|george/i.test(v.name));
+      if (male) return male;
+    }
+
+    return pool[0] || voices[0] || null;
+  };
+
+  const speak = (text: string, result?: AnalysisResult) => {
     if (!text.trim() || !('speechSynthesis' in window)) return;
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
+    const utterance = new SpeechSynthesisUtterance(buildSpeakSummary(text, result));
+    const langTag = detectSpeakLanguage(result);
+    utterance.lang = langTag;
     utterance.rate = 1.0;
     utterance.pitch = 1.0;
+    const voice = pickVoice(langTag);
+    if (voice) utterance.voice = voice;
     window.speechSynthesis.speak(utterance);
   };
 
@@ -210,6 +302,8 @@ function App() {
         text: r.text,
         attachedResult: r.attached_result,
       })));
+      const firstAnalysis = rows.find((r) => r.role === 'assistant' && r.attached_result)?.attached_result;
+      if (firstAnalysis) setSelectedDetail(firstAnalysis);
       setActiveThreadId(threadId);
       setView('chat');
     } catch (e) {
@@ -313,6 +407,7 @@ function App() {
     setMessages([]);
     setInput('');
     setView('chat');
+    setSelectedDetail(null);
   };
 
   const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -365,15 +460,22 @@ function App() {
       }
       const data: AnalysisResult = await res.json();
       const assistantId = `a-${Date.now()}`;
+      const assistantText = (data.response_mode && data.response_mode !== 'analysis')
+        ? (data.assistant_text || data.executive_summary || 'Done.')
+        : (data.executive_summary || 'Analysis complete.');
       const assistantMessage: ChatMessage = {
         id: assistantId,
         role: 'assistant',
         text: '',
       };
-      setMessages((prev) => [...prev, assistantMessage]);
-      const textOut = data.executive_summary || 'Analysis complete.';
-      await streamAssistantMessage(assistantId, textOut, data);
-      if (voiceReplyOn) speak(textOut);
+      if (data.response_mode === 'analysis') {
+        setMessages((prev) => [...prev, assistantMessage]);
+        await streamAssistantMessage(assistantId, assistantText, data);
+        setSelectedDetail(data);
+      } else {
+        setMessages((prev) => [...prev, { ...assistantMessage, text: assistantText }]);
+      }
+      if (voiceReplyOn) speak(assistantText, data);
       setActiveThreadId(data.chat_thread_id || activeThreadId);
       await loadHistory();
       await loadThreads();
@@ -399,7 +501,9 @@ function App() {
       const sn = ctx.createScriptProcessor(4096, 1, 1);
       pcmBufferRef.current = [];
       sn.onaudioprocess = (e) => {
-        pcmBufferRef.current.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        if (!isRecordPaused) {
+          pcmBufferRef.current.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        }
       };
       src.connect(sn);
       sn.connect(ctx.destination);
@@ -428,6 +532,7 @@ function App() {
       setRecordingSeconds(0);
       animateLevels();
       setIsRecording(true);
+      setIsRecordPaused(false);
       setError('');
     } catch (e) {
       setError(`Microphone error: ${String(e)}`);
@@ -453,6 +558,11 @@ function App() {
       audioCtxRef.current = null;
     }
     setRecordingLevels(Array.from({ length: 28 }, () => 0.06));
+  };
+
+  const togglePauseRecord = () => {
+    if (!isRecording) return;
+    setIsRecordPaused((v) => !v);
   };
 
   const cancelRecord = () => {
@@ -492,6 +602,7 @@ function App() {
       const fd = new FormData();
       fd.append('file', file);
       if (activeThreadId) fd.append('thread_id', activeThreadId);
+      if (audioLanguage !== 'auto') fd.append('asr_language', audioLanguage);
       const res = await authFetch('/api/analyze', { method: 'POST', body: fd });
       if (!res.ok) {
         const body = await res.json().catch(() => ({ detail: 'Audio analyze failed' }));
@@ -499,15 +610,26 @@ function App() {
       }
       const data: AnalysisResult = await res.json();
       const assistantId = `a-${Date.now()}`;
-      setMessages((prev) => [...prev, {
-        id: assistantId,
-        role: 'assistant',
-        text: '',
-      }]);
-      const textOut = data.executive_summary || 'Audio analysis complete.';
-      await streamAssistantMessage(assistantId, textOut, data);
+      const assistantText = (data.response_mode && data.response_mode !== 'analysis')
+        ? (data.assistant_text || data.executive_summary || 'Done.')
+        : (data.executive_summary || 'Audio analysis complete.');
+      if (data.response_mode === 'analysis') {
+        setMessages((prev) => [...prev, {
+          id: assistantId,
+          role: 'assistant',
+          text: '',
+        }]);
+        await streamAssistantMessage(assistantId, assistantText, data);
+        setSelectedDetail(data);
+      } else {
+        setMessages((prev) => [...prev, {
+          id: assistantId,
+          role: 'assistant',
+          text: assistantText,
+        }]);
+      }
       setActiveThreadId(data.chat_thread_id || activeThreadId);
-      if (voiceReplyOn) speak(textOut);
+      if (voiceReplyOn) speak(assistantText, data);
       await loadHistory();
       await loadThreads();
     } catch (e) {
@@ -550,6 +672,24 @@ function App() {
     [history, selectedInsightConversationId],
   );
 
+  const basicExplainability = useMemo(() => {
+    if (!selectedDetail) return null;
+    const topEntities = (selectedDetail.entities || []).slice(0, 3).map((e) => `${e.type}: ${e.value}`);
+    const topicScores = (selectedDetail.topic_top3 || []).slice(0, 3).map((t) => `${t.topic} (${Math.round(t.score * 100)}%)`);
+    const sentiment = selectedDetail.sentiment_breakdown || {};
+    const quality = selectedDetail.quality_metrics || {};
+
+    return {
+      whatUserSaid: firstSentence(selectedDetail.transcript || 'No transcript available.'),
+      whyRisk: firstSentence(selectedDetail.risk_assessment || `Risk classified as ${selectedDetail.risk_level || 'LOW'} from detected obligations and intent signals.`),
+      evidence: topEntities.length > 0 ? topEntities : ['No strong entities extracted in this turn.'],
+      topicCandidates: topicScores.length > 0 ? topicScores : ['No ranked topic candidates available.'],
+      sentimentSummary: `Positive ${Math.round((sentiment.positive || 0) * 100)}%, Neutral ${Math.round((sentiment.neutral || 0) * 100)}%, Negative ${Math.round((sentiment.negative || 0) * 100)}%`,
+      nextWatch: firstSentence(selectedDetail.future_gearing || 'Track affordability and commitment follow-through in the next conversation.'),
+      languageLine: `${String(selectedDetail.language || 'unknown').toUpperCase()} (${Math.round((selectedDetail.language_confidence || quality.language_confidence || 0) * 100)}% confidence)`,
+    };
+  }, [selectedDetail]);
+
   if (!token) {
     return (
       <div className="auth-shell">
@@ -587,13 +727,19 @@ function App() {
   }
 
   return (
-    <div className="chat-shell">
+    <div className={`chat-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       <aside className="chat-sidebar">
         <div className="sidebar-top">
-          <div className="brand-row"><Activity size={16} /> FinFlux</div>
+          <div className="brand-row">
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><Activity size={16} /> {!sidebarCollapsed ? 'FinFlux' : ''}</span>
+            <button className="collapse-btn" onClick={() => setSidebarCollapsed((v) => !v)}>
+              {sidebarCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+            </button>
+          </div>
           <button className="new-chat-btn" onClick={createNewChat}><Plus size={14} /> New Chat</button>
-          <button className={`side-tab ${view === 'chat' ? 'active' : ''}`} onClick={() => setView('chat')}><MessageSquare size={14} /> Chat</button>
-          <button className={`side-tab ${view === 'insights' ? 'active' : ''}`} onClick={() => setView('insights')}><BarChart3 size={14} /> Insights</button>
+          <button className={`side-tab ${view === 'chat' ? 'active' : ''}`} onClick={() => setView('chat')}><MessageSquare size={14} /> Current Chat</button>
+          <button className={`side-tab ${view === 'insights' ? 'active' : ''}`} onClick={() => setView('insights')}><BarChart3 size={14} /> Insights + Investments</button>
+          <button className={`side-tab ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}><Settings size={14} /> Settings</button>
         </div>
 
         <div className="history-list">
@@ -603,22 +749,23 @@ function App() {
               className={`history-item ${activeThreadId === item.thread_id ? 'active' : ''}`}
               onClick={() => openHistoryThread(item.thread_id)}
             >
-              <div className="history-topic">{item.topic || 'General'} ┬╖ {item.count}</div>
-              <div className="history-snippet">{(item.preview || '').slice(0, 70)}</div>
+              <div className="history-topic">History · {item.topic || 'General'} · {item.count}</div>
+              {!sidebarCollapsed && <div className="history-snippet">{(item.preview || '').slice(0, 70)}</div>}
             </button>
           ))}
         </div>
 
         <div className="sidebar-footer">
-          <div className="user-chip"><UserRound size={14} /> {username}</div>
+          <div className="user-chip"><UserRound size={14} /> {!sidebarCollapsed ? username : ''}</div>
           <button className="signout-btn" onClick={handleSignOut}><LogOut size={14} /> Sign out</button>
         </div>
       </aside>
 
       <main className="chat-main">
         {view === 'chat' && (
-          <>
-            <div className="messages-wrap">
+          <div className="chat-workspace">
+            <div className="chat-left-pane">
+              <div className="messages-wrap">
               {messages.length === 0 && (
                 <div className="empty-state">
                   <h2>How can I help with your financial call intelligence?</h2>
@@ -627,19 +774,18 @@ function App() {
               )}
               {messages.map((msg) => (
                 <div key={msg.id} className={`msg ${msg.role}`}>
-                  <div className="msg-bubble">
+                  <div className="msg-bubble" onClick={() => msg.attachedResult && setSelectedDetail(msg.attachedResult)}>
                     <p>{msg.text}</p>
                     {msg.role === 'assistant' && (
-                      <button className="speak-btn" onClick={() => speak(msg.text)}>
+                      <button className="speak-btn" onClick={() => speak(msg.text, msg.attachedResult)}>
                         <Volume2 size={14} /> Play voice
                       </button>
                     )}
-                    {msg.attachedResult && (
+                    {msg.attachedResult?.response_mode === 'analysis' && (
                       <>
                         <div className="msg-metrics">
                           <span>Topic: {msg.attachedResult.financial_topic}</span>
                           <span>Risk: {msg.attachedResult.risk_level}</span>
-                          <span>Language Mix: {formatLanguageMix(msg.attachedResult.language_mix)}</span>
                           <span>Confidence: {Math.round((msg.attachedResult.confidence_score || 0) * 100)}%</span>
                           <button
                             className="details-toggle"
@@ -714,6 +860,7 @@ function App() {
                 </div>
               ))}
               {error && <div className="error-line">{error}</div>}
+              </div>
             </div>
 
             <div className="composer">
@@ -739,12 +886,20 @@ function App() {
                     </button>
                   ) : (
                     <>
+                      <button className="audio-btn" onClick={togglePauseRecord}>
+                        {isRecordPaused ? <Play size={16} /> : <Pause size={16} />} {isRecordPaused ? 'Resume' : 'Pause'}
+                      </button>
                       <button className="audio-btn recording" onClick={stopRecord}>
                         <Mic size={16} /> Stop & Send
                       </button>
                       <button className="audio-cancel-btn" onClick={cancelRecord}>Cancel</button>
                     </>
                   )}
+                  <select value={audioLanguage} onChange={(e) => setAudioLanguage(e.target.value as 'auto' | 'hi' | 'en')} className="audio-lang-select">
+                    <option value="auto">Audio Language: Auto</option>
+                    <option value="hi">Audio Language: Hindi</option>
+                    <option value="en">Audio Language: English</option>
+                  </select>
                 </div>
               </div>
 
@@ -767,12 +922,45 @@ function App() {
                 </button>
               </div>
             </div>
-          </>
+
+            <aside className="chat-right-pane">
+              <h3>Analysis Details</h3>
+              {!selectedDetail && <p className="detail-placeholder">Select an analysis response to view full risk, entities, and strategic context.</p>}
+              {selectedDetail && (
+                <div className="right-details-card">
+                  <button className="speak-btn right-speak" onClick={() => speak(selectedDetail.executive_summary || selectedDetail.transcript || '', selectedDetail)}>
+                    <Volume2 size={14} /> Play insight voice
+                  </button>
+                  <p><strong>Topic:</strong> {selectedDetail.financial_topic || 'N/A'}</p>
+                  <p><strong>Risk:</strong> {selectedDetail.risk_level || 'LOW'}</p>
+                  <p><strong>Sentiment:</strong> {selectedDetail.financial_sentiment || 'Neutral'}</p>
+                  <p><strong>Confidence:</strong> {Math.round((selectedDetail.confidence_score || 0) * 100)}%</p>
+                  <p><strong>Summary:</strong> {selectedDetail.executive_summary || 'N/A'}</p>
+                  <p><strong>Strategic Intent:</strong> {selectedDetail.strategic_intent || 'N/A'}</p>
+                  <p><strong>Future Gearing:</strong> {selectedDetail.future_gearing || 'N/A'}</p>
+                  <p><strong>Risk Assessment:</strong> {selectedDetail.risk_assessment || 'N/A'}</p>
+
+                  {basicExplainability && (
+                    <div className="explain-box">
+                      <h4>Basic Explainability</h4>
+                      <p><strong>What user said:</strong> {basicExplainability.whatUserSaid}</p>
+                      <p><strong>Why this risk:</strong> {basicExplainability.whyRisk}</p>
+                      <p><strong>Language:</strong> {basicExplainability.languageLine}</p>
+                      <p><strong>Topic candidates:</strong> {basicExplainability.topicCandidates.join(' | ')}</p>
+                      <p><strong>Entity evidence:</strong> {basicExplainability.evidence.join(' | ')}</p>
+                      <p><strong>Sentiment signal:</strong> {basicExplainability.sentimentSummary}</p>
+                      <p><strong>What to monitor next:</strong> {basicExplainability.nextWatch}</p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </aside>
+          </div>
         )}
 
         {view === 'insights' && (
           <div className="insights-wrap">
-            <h2>Insights</h2>
+            <h2>Insights + Investments</h2>
             <div className="insights-grid">
               <div className="insight-card"><h3>Total conversations</h3><p>{insights.total}</p></div>
               <div className="insight-card"><h3>Average confidence</h3><p>{Math.round(insights.avgConfidence * 100)}%</p></div>
@@ -800,6 +988,17 @@ function App() {
                   {insights.topTopics.map(([topic, count]) => <li key={topic}>{topic}: {count}</li>)}
                 </ul>
               </div>
+              <div className="insight-card">
+                <h3>Investment Intent Signals</h3>
+                <ul>
+                  {insights.topTopics.filter(([topic]) => topic.includes('invest') || topic.includes('sip') || topic.includes('fund')).slice(0, 5).map(([topic, count]) => (
+                    <li key={`inv-${topic}`}>{topic}: {count}</li>
+                  ))}
+                  {insights.topTopics.filter(([topic]) => topic.includes('invest') || topic.includes('sip') || topic.includes('fund')).length === 0 && (
+                    <li>No strong investment pattern detected yet.</li>
+                  )}
+                </ul>
+              </div>
             </div>
 
             <div className="insights-drilldown">
@@ -824,7 +1023,6 @@ function App() {
                   <h4>{selectedInsightConversation.financial_topic}</h4>
                   <p><strong>Risk:</strong> {selectedInsightConversation.risk_level}</p>
                   <p><strong>Confidence:</strong> {Math.round((selectedInsightConversation.confidence_score || 0) * 100)}%</p>
-                  <p><strong>Language Mix:</strong> {formatLanguageMix(selectedInsightConversation.language_mix)}</p>
                   <p><strong>Summary:</strong> {selectedInsightConversation.executive_summary}</p>
                   <p><strong>Sentiment:</strong> {selectedInsightConversation.financial_sentiment || 'N/A'}</p>
                   <p><strong>Pipeline Latency:</strong> {(selectedInsightConversation.timing?.total_s || 0).toFixed(2)}s</p>
@@ -844,10 +1042,55 @@ function App() {
             </div>
           </div>
         )}
+
+        {view === 'settings' && (
+          <div className="insights-wrap">
+            <h2>Settings & Legal</h2>
+            <div className="settings-grid">
+              <div className="insight-card">
+                <h3>Appearance</h3>
+                <label>Theme Mode</label>
+                <select value={themeMode} onChange={(e) => setThemeMode(e.target.value as 'auto' | 'dark' | 'light')}>
+                  <option value="auto">Auto (System)</option>
+                  <option value="dark">Dark</option>
+                  <option value="light">Light</option>
+                </select>
+                <label>Font Size ({fontSizePx}px)</label>
+                <input type="range" min={12} max={18} value={fontSizePx} onChange={(e) => setFontSizePx(Number(e.target.value))} />
+                <label>Text Color</label>
+                <input type="color" value={textColor} onChange={(e) => setTextColor(e.target.value)} />
+              </div>
+              <div className="insight-card">
+                <h3>Audio Preferences</h3>
+                <label>Transcription Language</label>
+                <select value={audioLanguage} onChange={(e) => setAudioLanguage(e.target.value as 'auto' | 'hi' | 'en')}>
+                  <option value="auto">Auto</option>
+                  <option value="hi">Hindi</option>
+                  <option value="en">English</option>
+                </select>
+                <label>TTS Voice Profile</label>
+                <select value={ttsVoiceProfile} onChange={(e) => setTtsVoiceProfile(e.target.value as 'auto' | 'female' | 'male')}>
+                  <option value="auto">Auto</option>
+                  <option value="female">Female (preferred)</option>
+                  <option value="male">Male (preferred)</option>
+                </select>
+                <p style={{ marginTop: 10, color: 'var(--text-secondary)', fontSize: 13 }}>
+                  TTS uses browser voices with Hindi/English auto-detect and short advisor-style insight playback.
+                </p>
+              </div>
+              <div className="insight-card">
+                <h3><Shield size={14} style={{ marginRight: 6 }} /> Legal</h3>
+                <p><strong>Privacy Policy:</strong> We store encrypted audio and masked transcripts for intelligence extraction.</p>
+                <p><strong>Terms:</strong> FinFlux provides structured analysis, not financial advice.</p>
+                <p><strong>Data Usage:</strong> Conversation analytics are scoped to authenticated user context.</p>
+                <p><strong>Retention:</strong> Users can purge history from the dashboard.</p>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );
 }
 
 export default App;
-
