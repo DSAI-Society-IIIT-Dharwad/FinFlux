@@ -309,7 +309,23 @@ def _supabase_insert_conversation(data: Dict[str, Any]) -> None:
         ts = datetime.datetime.utcnow().isoformat()
     normalized_topic = str(data.get("financial_topic") or data.get("topic") or "N/A")
 
-    # Upsert thread with explicit user filter guard fields.
+    # Upsert thread with ownership guard — prevent cross-user metadata overwrite.
+    try:
+        existing_thread = _supabase_request(
+            "GET",
+            f"/rest/v1/{SUPABASE_CONV_THREADS_TABLE}",
+            params={"select": "id,user_id", "id": f"eq.{thread_id}", "limit": "1"},
+        ) or []
+        if existing_thread and isinstance(existing_thread, list) and existing_thread[0].get("user_id") != user_id:
+            raise ValueError(
+                f"Thread {thread_id} is owned by a different user. "
+                f"Cannot overwrite ownership."
+            )
+    except ValueError:
+        raise
+    except Exception:
+        pass  # Network/table errors fall through to upsert below
+
     _supabase_request(
         "POST",
         f"/rest/v1/{SUPABASE_CONV_THREADS_TABLE}",
@@ -503,7 +519,7 @@ def search_memories(
 
     try:
         if not _supabase_vector_enabled():
-            return {"results": [], "error": "Supabase vector search not configured"}
+            return {"results": [], "error": "Supabase vector search not configured", "degraded": True}
 
         supa_results = _supabase_vector_search(
             user_id=user_id,
@@ -514,10 +530,14 @@ def search_memories(
             risk_level=risk_level,
             min_similarity=min_similarity,
         )
-        return {"results": supa_results, "source": "supabase"}
+        return {"results": supa_results, "source": "supabase", "degraded": False}
     except Exception as e:
-        print(f"[Storage] Supabase semantic search error: {e}")
-        return {"results": [], "error": str(e)}
+        import logging
+        logging.warning(
+            "[Storage] Semantic search DEGRADED for user=%s query='%s': %s",
+            user_id, query_text[:80], e,
+        )
+        return {"results": [], "error": str(e), "degraded": True}
 
 def _map_bridge_message_to_conversation(row: Dict[str, Any]) -> Dict[str, Any]:
     model_attribution = row.get("model_attribution") or {}

@@ -231,47 +231,57 @@ class ExpertSynthesisEngine:
             brief = " ".join(words[:180]).strip()
         return brief
 
-    def _memory_is_relevant(self, transcript: str, memory_record: Dict[str, Any]) -> bool:
-        """Binary relevance gate for one memory record using fast model."""
+    def _batch_relevance_gate(self, transcript: str, memory_records: List[Dict[str, Any]]) -> List[bool]:
+        """Batch relevance gate: single LLM call for all candidate memories."""
         gate_system = (
             "You are a strict relevance gate for financial memory retrieval. "
-            "Given a current transcript and one past memory record, answer only YES or NO. "
-            "Answer YES only if the memory is directly relevant to the same financial concern, "
-            "product context, commitment, or decision trajectory. Otherwise answer NO."
+            "Given a current transcript and a numbered list of past memory records, "
+            "return a JSON array of booleans (true/false) indicating whether each record "
+            "is directly relevant to the same financial concern, product context, commitment, "
+            "or decision trajectory in the current transcript. "
+            "Output ONLY a JSON array like [true, false, true]. No other text."
         )
+        compact_memories = []
+        for i, rec in enumerate(memory_records):
+            compact_memories.append({
+                "index": i,
+                "financial_topic": str(rec.get("financial_topic", ""))[:80],
+                "risk_level": str(rec.get("risk_level") or rec.get("risk", ""))[:20],
+                "strategic_intent": str(rec.get("strategic_intent", ""))[:100],
+                "executive_summary": str(rec.get("executive_summary", ""))[:200],
+            })
         gate_user = json.dumps(
-            {
-                "current_transcript": transcript,
-                "memory": {
-                    "financial_topic": memory_record.get("financial_topic", ""),
-                    "risk_level": memory_record.get("risk_level") or memory_record.get("risk", ""),
-                    "financial_sentiment": memory_record.get("financial_sentiment", ""),
-                    "strategic_intent": memory_record.get("strategic_intent", ""),
-                    "executive_summary": memory_record.get("executive_summary", ""),
-                    "transcript": memory_record.get("transcript", ""),
-                },
-            },
+            {"current_transcript": transcript[:800], "memories": compact_memories},
             ensure_ascii=False,
         )
         try:
-            out = self._call_groq(gate_system, gate_user, model_override=self.fast_model).strip().upper()
-            return out.startswith("YES")
-        except Exception:
-            return False
+            raw = self._call_groq(gate_system, gate_user, model_override=self.fast_model).strip()
+            # Extract JSON array from response
+            cleaned = raw
+            if "```json" in cleaned:
+                cleaned = cleaned.split("```json")[-1].split("```")[0].strip()
+            elif "```" in cleaned:
+                cleaned = cleaned.split("```")[-1].split("```")[0].strip()
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, list) and len(parsed) == len(memory_records):
+                return [bool(v) for v in parsed]
+            # If length mismatch, fall back to all-relevant
+            return [True] * len(memory_records)
+        except Exception as exc:
+            print(f"[ExpertSynthesis] Batch relevance gate failed ({exc}); including all candidates.")
+            return [True] * len(memory_records)
 
     def build_memory_context(self, transcript: str, memory_records: List[Dict[str, Any]], max_keep: int = 3) -> str:
-        """Layer 3: relevance-gate retrieved memories, then synthesize a compact memory brief."""
+        """Layer 3: batch relevance-gate retrieved memories, then synthesize a compact memory brief."""
         if not memory_records:
             return ""
 
-        relevant: List[Dict[str, Any]] = []
-        for row in memory_records[:8]:
-            if not isinstance(row, dict):
-                continue
-            if self._memory_is_relevant(transcript, row):
-                relevant.append(row)
-            if len(relevant) >= max_keep:
-                break
+        candidates = [row for row in memory_records[:8] if isinstance(row, dict)]
+        if not candidates:
+            return ""
+
+        relevance_flags = self._batch_relevance_gate(transcript, candidates)
+        relevant = [rec for rec, is_rel in zip(candidates, relevance_flags) if is_rel][:max_keep]
 
         if not relevant:
             return ""
@@ -521,7 +531,7 @@ Return ONLY valid JSON matching this exact schema:
 {
     "executive_summary": "4 sentences minimum. Focus primarily on CURRENT TRANSCRIPT specifics and figures.",
   "key_insights": [
-    "Commitment: [Exploratory vs Decision] — reference specific code language",
+    "Commitment: [Exploratory vs Decision] — reference specific transcript quotes",
     "Asset Mix: Tier 1/2/3 mapping observations",
     "Risk Quantification: Specific risk indicator with figures"
   ],

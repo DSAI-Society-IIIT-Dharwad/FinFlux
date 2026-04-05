@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Activity, ArrowRight, Eye, EyeOff } from 'lucide-react';
 import { motion } from 'framer-motion';
+import DecryptedText from '../DecryptedText';
 
 export type TravelConnectAuthMode = 'signin' | 'signup';
 
@@ -33,11 +34,11 @@ type Route = {
 };
 
 const ROUTES: Route[] = [
-  { start: { x: 0.13, y: 0.27, delay: 0 }, end: { x: 0.34, y: 0.18, delay: 0 }, color: '#60a5fa' },
-  { start: { x: 0.34, y: 0.18, delay: 0.6 }, end: { x: 0.48, y: 0.25, delay: 0.6 }, color: '#3b82f6' },
-  { start: { x: 0.18, y: 0.68, delay: 1.1 }, end: { x: 0.43, y: 0.37, delay: 1.1 }, color: '#38bdf8' },
-  { start: { x: 0.70, y: 0.24, delay: 0.4 }, end: { x: 0.50, y: 0.62, delay: 0.4 }, color: '#60a5fa' },
-  { start: { x: 0.53, y: 0.62, delay: 1.3 }, end: { x: 0.73, y: 0.56, delay: 1.3 }, color: '#3b82f6' },
+  { start: { x: 0.13, y: 0.27, delay: 0 }, end: { x: 0.34, y: 0.18, delay: 0 }, color: '#00ff9c' },
+  { start: { x: 0.34, y: 0.18, delay: 0.6 }, end: { x: 0.48, y: 0.25, delay: 0.6 }, color: '#00cc7d' },
+  { start: { x: 0.18, y: 0.68, delay: 1.1 }, end: { x: 0.43, y: 0.37, delay: 1.1 }, color: '#ff4ecd' },
+  { start: { x: 0.70, y: 0.24, delay: 0.4 }, end: { x: 0.50, y: 0.62, delay: 0.4 }, color: '#00ff9c' },
+  { start: { x: 0.53, y: 0.62, delay: 1.3 }, end: { x: 0.73, y: 0.56, delay: 1.3 }, color: '#ff4ecd' },
 ];
 
 function generateDots(width: number, height: number) {
@@ -148,12 +149,12 @@ function DotMap() {
 
         context.beginPath();
         context.arc(x, y, 3, 0, Math.PI * 2);
-        context.fillStyle = '#60a5fa';
+        context.fillStyle = '#00ff9c';
         context.fill();
 
         context.beginPath();
         context.arc(x, y, 6, 0, Math.PI * 2);
-        context.fillStyle = 'rgba(96, 165, 250, 0.3)';
+        context.fillStyle = 'rgba(0, 255, 156, 0.3)';
         context.fill();
 
         if (progress === 1) {
@@ -230,10 +231,19 @@ export default function TravelConnectSignin({
           <DotMap />
           <div className="travel-connect-map-overlay" aria-hidden="true">
             <div className="travel-connect-logo">
-              <Activity className="travel-connect-logo-icon" size={26} />
+              <h2 style={{ fontSize: '3rem', letterSpacing: '-0.02em', background: 'linear-gradient(180deg, #fff 0%, #00ff9c 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+                <DecryptedText
+                  text="finflux"
+                  speed={45}
+                  maxIterations={12}
+                  characters="01!@#%"
+                  animateOn="view"
+                  revealDirection="center"
+                  sequential
+                />
+              </h2>
             </div>
-            <h2>FinFlux</h2>
-            <p>Secure finance intelligence for faster decisions, structured insights, and memory-aware analysis.</p>
+            <p style={{ marginTop: '16px' }}>Secure finance intelligence for faster decisions, structured insights, and memory-aware analysis.</p>
           </div>
 
           <div className="travel-connect-stat travel-connect-stat-top">

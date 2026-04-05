@@ -1,10 +1,108 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Copy, Mic, Pencil, RotateCcw, Shield } from 'lucide-react';
+import { Copy, Mic, Pencil, Shield, Download } from 'lucide-react';
 import LandingPage from './pages/LandingPage.tsx';
 import TravelConnectSignin, { type TravelConnectAuthMode } from './components/ui/travel-connect-signin';
 import { AppSidebar } from './components/app-sidebar';
 import { SidebarProvider, SidebarTrigger } from './components/ui/sidebar';
 import { PromptBox } from './components/ui/chatgpt-prompt-input';
+
+const exportPDF = (d: AnalysisResult) => {
+  const printWindow = window.open('', '_blank');
+  if (!printWindow) return;
+  printWindow.document.write(`
+    <html>
+      <head>
+        <title>FinFlux Advisor Report</title>
+        <style>
+          @page { size: A4 portrait; margin: 20mm; }
+          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", default; color: #1e293b; line-height: 1.6; font-size: 11pt; padding: 0; margin: 0; background: #fff; }
+          h1 { color: #020617; font-size: 28pt; letter-spacing: -1px; margin-bottom: 0; border-bottom: 3px solid #0f172a; padding-bottom: 10px; }
+          h2 { color: #0f172a; font-size: 16pt; margin-top: 35px; border-bottom: 1px solid #e2e8f0; padding-bottom: 5px; }
+          .page-break { page-break-before: always; }
+          .cover { display: flex; flex-direction: column; min-height: 90vh; justify-content: center; }
+          .brand { font-size: 40pt; font-weight: 800; background: linear-gradient(180deg, #1e293b 0%, #059669 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; letter-spacing: -2px; }
+          .meta { margin-top: 40px; border-top: 2px solid #e2e8f0; padding-top: 20px; font-size: 12pt; }
+          .meta-row { display: flex; justify-content: space-between; margin-bottom: 10px; }
+          .executive { padding: 30px; background: #f8fafc; border-left: 4px solid #059669; font-size: 13pt; margin-top: 40px; }
+          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 25px; margin-top: 20px; }
+          .card { border: 1px solid #e2e8f0; padding: 20px; border-radius: 8px; }
+          .tag { display: inline-block; padding: 4px 10px; background: #f1f5f9; border-radius: 4px; font-weight: 600; font-size: 10pt; }
+          .tag.high { background: #fee2e2; color: #991b1b; }
+          .tag.low { background: #d1fae5; color: #065f46; }
+          table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+          th, td { text-align: left; padding: 12px; border-bottom: 1px solid #e2e8f0; }
+          th { font-weight: 600; color: #64748b; font-size: 10pt; text-transform: uppercase; }
+          .expert-wall { font-family: "Georgia", serif; font-size: 11pt; line-height: 1.8; color: #334155; white-space: pre-wrap; margin-top: 20px; }
+        </style>
+      </head>
+      <body>
+        <!-- Page 1: Cover & Executive Summary -->
+        <div class="cover">
+          <div class="brand">finflux</div>
+          <h1 style="border: none;">Client Insight Report</h1>
+          
+          <div class="meta">
+            <div class="meta-row"><strong>Report ID:</strong> <span>${d.conversation_id}</span></div>
+            <div class="meta-row"><strong>Extracted:</strong> <span>${new Date(d.timestamp || Date.now()).toLocaleString()}</span></div>
+            <div class="meta-row"><strong>Audio Language:</strong> <span>${d.language || 'EN'} (Conf: ${Math.round((d.language_confidence || 0) * 100)}%)</span></div>
+          </div>
+          
+          <div class="executive">
+            <p style="text-transform: uppercase; font-size: 10pt; font-weight: bold; color: #059669; margin: 0 0 10px 0;">Executive Summary</p>
+            ${d.executive_summary || 'No summary available.'}
+          </div>
+        </div>
+
+        <!-- Page 2: Risk Audit & Metrics -->
+        <div class="page-break">
+          <h1>Risk Audit & NLP Extraction</h1>
+          <div class="grid">
+            <div class="card">
+              <h2>Key Identifiers</h2>
+              <table>
+                <tr><th>Metric</th><th>Value</th></tr>
+                <tr><td>Risk Level</td><td><span class="tag ${String(d.risk_level).toLowerCase()}">${d.risk_level || 'N/A'}</span></td></tr>
+                <tr><td>Dominant Sentiment</td><td><span class="tag">${d.financial_sentiment || 'Neutral'}</span></td></tr>
+                <tr><td>Strategic Intent</td><td>${d.strategic_intent || 'N/A'}</td></tr>
+              </table>
+            </div>
+            <div class="card">
+              <h2>Data Pipeline Metrics</h2>
+              <table>
+                <tr><th>Agent</th><th>Score</th></tr>
+                <tr><td>Speech-to-Text</td><td>${Math.round((d.quality_metrics?.asr_confidence || 0) * 100)}%</td></tr>
+                <tr><td>NER Coverage</td><td>${Math.round(d.quality_metrics?.ner_coverage_pct || 0)}%</td></tr>
+                <tr><td>ROUGE-1 Recall</td><td>${Math.round((d.quality_metrics?.rouge1_recall || 0) * 100)}%</td></tr>
+              </table>
+            </div>
+          </div>
+          <h2>Identified Financial Entities</h2>
+          <table>
+            <tr><th>Entity Type</th><th>Extracted Value</th></tr>
+            ${(d.entities || []).map(e => `<tr><td><strong>${e.type}</strong></td><td>${e.value}</td></tr>`).join('') || '<tr><td colspan="2">No entities found.</td></tr>'}
+          </table>
+          
+          <h2>Raw Transcript</h2>
+          <p style="padding: 15px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">${d.transcript || d.raw_asr_text || 'No transcript available.'}</p>
+        </div>
+
+        <!-- Page 3: Expert Reasoning Walls -->
+        <div class="page-break">
+          <h1>Expert Analyst Reasoning</h1>
+          <div class="expert-wall">${d.expert_reasoning_points || 'No expert reasoning provided.'}</div>
+          
+          <h2 style="margin-top: 40px;">Future Outlook & Gearing</h2>
+          <div class="expert-wall" style="padding: 20px; background: #f1f5f9; border-left: 4px solid #3b82f6;">${d.future_gearing || 'Monitor situation actively.'}</div>
+        </div>
+        
+        <script>
+          window.onload = () => { window.print(); window.setTimeout(() => window.close(), 500); }
+        </script>
+      </body>
+    </html>
+  `);
+  printWindow.document.close();
+};
 
 type ViewMode = 'chat' | 'insights' | 'settings';
 
@@ -44,6 +142,8 @@ interface AnalysisResult {
   sentiment_breakdown?: SentimentBreakdown;
   quality_metrics?: QualityMetrics;
   entities: Entity[];
+  key_insights?: string[];
+  raw_asr_text?: string;
 }
 
 interface ChatMessage {
@@ -63,7 +163,58 @@ interface ThreadSummary {
   count: number;
 }
 
+const riskColor = (level: string) => {
+  switch ((level || '').toUpperCase()) {
+    case 'CRITICAL': return '#ef4444';
+    case 'HIGH': return '#f97316';
+    case 'MEDIUM': return '#eab308';
+    case 'LOW': return '#22c55e';
+    default: return '#64748b';
+  }
+};
+
 const API_BASE = 'http://localhost:8000';
+
+/* Lightweight markdown →  JSX for LLM output: **bold**, numbered lists, line breaks */
+function renderMarkdown(text: string): React.ReactNode[] {
+  if (!text) return [];
+  const lines = text.split('\n');
+  const nodes: React.ReactNode[] = [];
+  let listItems: React.ReactNode[] = [];
+  const flushList = () => {
+    if (listItems.length > 0) {
+      nodes.push(<ol key={`ol-${nodes.length}`} className="md-list">{listItems}</ol>);
+      listItems = [];
+    }
+  };
+  lines.forEach((line, idx) => {
+    const trimmed = line.trim();
+    if (!trimmed) { flushList(); return; }
+    const listMatch = trimmed.match(/^(\d+)\.\s+(.+)$/);
+    if (listMatch) {
+      listItems.push(<li key={idx}>{parseBold(listMatch[2])}</li>);
+      return;
+    }
+    const bulletMatch = trimmed.match(/^[-•]\s+(.+)$/);
+    if (bulletMatch) {
+      listItems.push(<li key={idx}>{parseBold(bulletMatch[1])}</li>);
+      return;
+    }
+    flushList();
+    nodes.push(<p key={idx} className="md-para">{parseBold(trimmed)}</p>);
+  });
+  flushList();
+  return nodes;
+}
+function parseBold(text: string): React.ReactNode {
+  const parts = text.split(/(\*\*[^*]+\*\*)/);
+  return parts.map((part, i) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={i}>{part.slice(2, -2)}</strong>;
+    }
+    return part;
+  });
+}
 
 function encodeWavBlob(samples: Float32Array, sr: number): Blob {
   const bps = 16;
@@ -123,7 +274,7 @@ function App() {
   const [voiceReplyOn] = useState(false);
   const [selectedInsightConversationId, setSelectedInsightConversationId] = useState('');
   const [selectedDetail, setSelectedDetail] = useState<AnalysisResult | null>(null);
-  const [themeMode, setThemeMode] = useState<'auto' | 'dark' | 'light'>('auto');
+  const [themeMode, setThemeMode] = useState<'auto' | 'dark' | 'light'>('dark');
   const [fontSizePx, setFontSizePx] = useState<number>(14);
   const [textColor, setTextColor] = useState<string>('#e2e8f0');
   const [audioLanguage, setAudioLanguage] = useState<'auto' | 'hi' | 'en'>('auto');
@@ -342,7 +493,10 @@ function App() {
   };
 
   const startConversationEdit = (conversationId: string, fallbackPrompt = '') => {
-    const prompt = getPromptByConversationId(conversationId) || fallbackPrompt;
+    let prompt = getPromptByConversationId(conversationId) || fallbackPrompt;
+    if (prompt === 'Voice message sent' && fallbackPrompt) {
+      prompt = fallbackPrompt;
+    }
     if (!prompt.trim()) {
       setError('Original prompt not found for this summary.');
       return;
@@ -536,23 +690,6 @@ function App() {
     [history, selectedInsightConversationId],
   );
 
-  const basicExplainability = useMemo(() => {
-    if (!selectedDetail) return null;
-    const topEntities = (selectedDetail.entities || []).slice(0, 3).map((e) => `${e.type}: ${e.value}`);
-    const topicScores = (selectedDetail.topic_top3 || []).slice(0, 3).map((t) => `${t.topic} (${Math.round(t.score * 100)}%)`);
-    const sentiment = selectedDetail.sentiment_breakdown || {};
-    const quality = selectedDetail.quality_metrics || {};
-
-    return {
-      whatUserSaid: firstSentence(selectedDetail.transcript || 'No transcript available.'),
-      whyRisk: firstSentence(selectedDetail.risk_assessment || `Risk classified as ${selectedDetail.risk_level || 'LOW'} from detected obligations and intent signals.`),
-      evidence: topEntities.length > 0 ? topEntities : ['No strong entities extracted in this turn.'],
-      topicCandidates: topicScores.length > 0 ? topicScores : ['No ranked topic candidates available.'],
-      sentimentSummary: `Positive ${Math.round((sentiment.positive || 0) * 100)}%, Neutral ${Math.round((sentiment.neutral || 0) * 100)}%, Negative ${Math.round((sentiment.negative || 0) * 100)}%`,
-      nextWatch: firstSentence(selectedDetail.future_gearing || 'Track affordability and commitment follow-through in the next conversation.'),
-      languageLine: `${String(selectedDetail.language || 'unknown').toUpperCase()} (${Math.round((selectedDetail.language_confidence || quality.language_confidence || 0) * 100)}% confidence)`,
-    };
-  }, [selectedDetail]);
 
   if (showLanding) {
     return <LandingPage onGetStarted={() => {
@@ -601,9 +738,7 @@ function App() {
       }
       const data: AnalysisResult = await res.json();
       const assistantId = `a-${Date.now()}`;
-      const assistantText = (data.response_mode && data.response_mode !== 'analysis')
-        ? (data.assistant_text || data.executive_summary || 'Done.')
-        : (data.executive_summary || 'Analysis complete.');
+      const assistantText = data.executive_summary || data.assistant_text || 'Analysis complete.';
       const assistantMessage: ChatMessage = {
         id: assistantId,
         role: 'assistant',
@@ -611,13 +746,9 @@ function App() {
         conversationId: data.conversation_id,
       };
       setMessages((prev) => prev.map((m) => (m.id === userMessageId ? { ...m, conversationId: data.conversation_id } : m)));
-      if (data.response_mode === 'analysis') {
-        setMessages((prev) => [...prev, assistantMessage]);
-        await streamAssistantMessage(assistantId, assistantText, data);
-        setSelectedDetail(data);
-      } else {
-        setMessages((prev) => [...prev, { ...assistantMessage, text: assistantText }]);
-      }
+      setMessages((prev) => [...prev, assistantMessage]);
+      await streamAssistantMessage(assistantId, assistantText, data);
+      setSelectedDetail(data);
       if (voiceReplyOn) speak(assistantText, data);
       setActiveThreadId(data.chat_thread_id || activeThreadId);
       await loadHistory();
@@ -651,28 +782,16 @@ function App() {
       }
       const data: AnalysisResult = await res.json();
       const assistantId = `a-${Date.now()}`;
-      const assistantText = (data.response_mode && data.response_mode !== 'analysis')
-        ? (data.assistant_text || data.executive_summary || 'Done.')
-        : (data.executive_summary || 'Audio analysis complete.');
-      if (data.response_mode === 'analysis') {
-        setMessages((prev) => [...prev, {
-          id: assistantId,
-          role: 'assistant',
-          text: '',
-          conversationId: data.conversation_id,
-        }]);
-        setMessages((prev) => prev.map((m) => (m.id === userMessageId ? { ...m, conversationId: data.conversation_id } : m)));
-        await streamAssistantMessage(assistantId, assistantText, data);
-        setSelectedDetail(data);
-      } else {
-        setMessages((prev) => [...prev, {
-          id: assistantId,
-          role: 'assistant',
-          text: assistantText,
-          conversationId: data.conversation_id,
-        }]);
-        setMessages((prev) => prev.map((m) => (m.id === userMessageId ? { ...m, conversationId: data.conversation_id } : m)));
-      }
+      const assistantText = data.executive_summary || data.assistant_text || 'Audio analysis complete.';
+      setMessages((prev) => [...prev, {
+        id: assistantId,
+        role: 'assistant',
+        text: '',
+        conversationId: data.conversation_id,
+      }]);
+      setMessages((prev) => prev.map((m) => (m.id === userMessageId ? { ...m, conversationId: data.conversation_id } : m)));
+      await streamAssistantMessage(assistantId, assistantText, data);
+      setSelectedDetail(data);
       setActiveThreadId(data.chat_thread_id || activeThreadId);
       if (voiceReplyOn) speak(assistantText, data);
       await loadHistory();
@@ -859,16 +978,16 @@ function App() {
                 <div className="messages-wrap">
               {messages.length === 0 && (
                 <div className="empty-state">
-                  <h2>Record or upload a financial call to begin analysis.</h2>
-                  <p>FinFlux will transcribe call audio and generate risk, intent, and advisory insights.</p>
+                  <h2>Record or type a financial conversation to begin.</h2>
+                  <p>FinFlux will transcribe, detect financial entities, and generate structured insights.</p>
                   <div className="empty-audio-cta">
                     <button
                       type="button"
                       className="prompt-icon-btn prompt-mic-btn empty-mic-btn"
                       onClick={startRecord}
                       disabled={isSending || isRecording}
-                      title="Start first call recording"
-                      aria-label="Start first call recording"
+                      title="Start recording"
+                      aria-label="Start recording"
                     >
                       <Mic size={100} />
                     </button>
@@ -877,39 +996,64 @@ function App() {
               )}
               {messages.map((msg) => (
                 <div key={msg.id} className={`msg ${msg.role}`}>
-                  <div className="msg-bubble" onClick={() => msg.attachedResult && setSelectedDetail(msg.attachedResult)}>
-                    {msg.role === 'assistant' && <p className="msg-label">Call Summary</p>}
-                    <p>{msg.text}</p>
+                  <div className={`msg-bubble ${msg.attachedResult ? 'has-analysis' : ''}`} onClick={() => msg.attachedResult && setSelectedDetail(msg.attachedResult)}>
+                    {msg.role === 'assistant' && msg.attachedResult && (
+                        <div className="msg-structured">
+                        <div className="msg-structured-header">
+                          <span className="msg-topic-badge">{msg.attachedResult.financial_topic || 'Financial Analysis'}</span>
+                          <span className="msg-risk-badge" style={{ background: riskColor(msg.attachedResult.risk_level) }}>{msg.attachedResult.risk_level || 'LOW'}</span>
+                        </div>
+                        <div className="msg-section">
+                          <h4>Executive Summary</h4>
+                          <div className="md-content">{renderMarkdown(msg.text || msg.attachedResult.executive_summary || 'Analysis complete.')}</div>
+                        </div>
+                        {msg.attachedResult.key_insights && msg.attachedResult.key_insights.length > 0 && (
+                          <div className="msg-section">
+                            <h4>Key Insights</h4>
+                            <ul>{(msg.attachedResult.key_insights as string[]).map((insight, i) => <li key={i}>{parseBold(insight)}</li>)}</ul>
+                          </div>
+                        )}
+                        {msg.attachedResult.risk_assessment && (
+                          <div className="msg-section">
+                            <h4>Risk Assessment</h4>
+                            <div className="md-content">{renderMarkdown(msg.attachedResult.risk_assessment)}</div>
+                          </div>
+                        )}
+                        {msg.attachedResult.expert_reasoning_points && (
+                          <details className="msg-section reasoning-inline">
+                            <summary><h4 style={{ display: 'inline' }}>Expert Reasoning</h4></summary>
+                            <div className="md-content">{renderMarkdown(msg.attachedResult.expert_reasoning_points)}</div>
+                          </details>
+                        )}
+                        {msg.attachedResult.future_gearing && (
+                          <div className="msg-section">
+                            <h4>Future Outlook</h4>
+                            <div className="md-content">{renderMarkdown(msg.attachedResult.future_gearing)}</div>
+                          </div>
+                        )}
+                        <div className="msg-meta-chips">
+                          <span>Intent: {msg.attachedResult.strategic_intent || 'N/A'}</span>
+                          <span>Lang: {String(msg.attachedResult.language || 'unknown').toUpperCase()}</span>
+                          <span>Sentiment: {msg.attachedResult.financial_sentiment || 'Neutral'}</span>
+                          <span>Latency: {(msg.attachedResult.timing?.total_s || 0).toFixed(1)}s</span>
+                        </div>
+                      </div>
+                    )}
+                    {msg.role === 'assistant' && !msg.attachedResult && <p>{msg.text}</p>}
+                    {msg.role === 'user' && <p>{msg.text}</p>}
                     {msg.role === 'user' && (
                       <div className="msg-tools" onClick={(e) => e.stopPropagation()}>
-                        <button className="msg-tool-btn" onClick={() => void copyPrompt(msg.id, msg.text)} title="Copy prompt" aria-label="Copy prompt">
+                        <button className="msg-tool-btn" onClick={() => void copyPrompt(msg.id, msg.text)} title="Copy" aria-label="Copy">
                           <Copy size={13} />
                           <span>{copiedMessageId === msg.id ? 'Copied' : 'Copy'}</span>
                         </button>
-                        <button className="msg-tool-btn" onClick={() => editPrompt(msg.text, msg.conversationId)} title="Edit prompt" aria-label="Edit prompt">
-                          <Pencil size={13} />
-                          <span>Edit</span>
-                        </button>
-                      </div>
-                    )}
-                    {msg.role === 'assistant' && msg.attachedResult?.response_mode === 'analysis' && (
-                      <>
-                        <div className="msg-meta-line">
-                          <span>Topic: {msg.attachedResult.financial_topic}</span>
-                          <span>Risk: {msg.attachedResult.risk_level}</span>
-                        </div>
-                        <div className="summary-actions" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            className="msg-tool-btn"
-                            onClick={() => startConversationEdit(msg.attachedResult!.conversation_id, msg.attachedResult!.transcript || '')}
-                            title="Re-run analysis"
-                            aria-label="Re-run analysis"
-                          >
-                            <RotateCcw size={13} />
-                            <span>Re-run Analysis</span>
+                        {msg.text !== 'Voice message sent' && (
+                          <button className="msg-tool-btn" onClick={() => editPrompt(msg.text, msg.conversationId)} title="Edit" aria-label="Edit">
+                            <Pencil size={13} />
+                            <span>Edit</span>
                           </button>
-                        </div>
-                      </>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>
@@ -919,41 +1063,153 @@ function App() {
               </div>
 
               {messages.length > 0 && (
-                <aside className="chat-right-pane">
-                  <h3>Call Analysis Details</h3>
-                  {!selectedDetail && <p className="detail-placeholder">Select an analysis response to view full risk, entities, and strategic context.</p>}
-                  {selectedDetail && (
-                    <div className="right-details-card">
-                      <div className="analysis-topic-block">
-                        <h4>Topic</h4>
-                        <p>{selectedDetail.financial_topic || 'N/A'}</p>
+                <aside className="chat-right-pane electric-border">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <h3 className="gradient-text">Analysis Details</h3>
+                    {selectedDetail && (
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <button className="msg-tool-btn" onClick={() => exportPDF(selectedDetail)} title="Export Elite PDF">
+                          <Download size={13} />
+                          <span>Elite PDF Report</span>
+                        </button>
                       </div>
-
-                      <div className="analysis-grid">
-                        <p><strong>Risk:</strong> {selectedDetail.risk_level || 'LOW'}</p>
-                        <p><strong>Confidence:</strong> {Math.round((selectedDetail.confidence_score || 0) * 100)}%</p>
-                        <p><strong>Sentiment:</strong> {selectedDetail.financial_sentiment || 'Neutral'}</p>
-                        <p><strong>Language:</strong> {String(selectedDetail.language || 'unknown').toUpperCase()}</p>
-                        <p><strong>Strategic Intent:</strong> {selectedDetail.strategic_intent || 'N/A'}</p>
-                        <p><strong>Future Gearing:</strong> {selectedDetail.future_gearing || 'N/A'}</p>
-                        <p><strong>Risk Assessment:</strong> {selectedDetail.risk_assessment || 'N/A'}</p>
-                        <p><strong>Pipeline Latency:</strong> {(selectedDetail.timing?.total_s || 0).toFixed(2)}s</p>
-                      </div>
-
-                      {basicExplainability && (
-                        <div className="explain-box">
-                          <h4>Basic Explainability</h4>
-                          <p><strong>What user said:</strong> {basicExplainability.whatUserSaid}</p>
-                          <p><strong>Why this risk:</strong> {basicExplainability.whyRisk}</p>
-                          <p><strong>Language:</strong> {basicExplainability.languageLine}</p>
-                          <p><strong>Topic candidates:</strong> {basicExplainability.topicCandidates.join(' | ')}</p>
-                          <p><strong>Entity evidence:</strong> {basicExplainability.evidence.join(' | ')}</p>
-                          <p><strong>Sentiment signal:</strong> {basicExplainability.sentimentSummary}</p>
-                          <p><strong>What to monitor next:</strong> {basicExplainability.nextWatch}</p>
+                    )}
+                  </div>
+                  {!selectedDetail && <p className="detail-placeholder">Select a response to view details.</p>}
+                  {selectedDetail && (() => {
+                    const d = selectedDetail;
+                    const sb = d.sentiment_breakdown || {};
+                    const ents = d.entities || [];
+                    const qm = d.quality_metrics || {};
+                    return (
+                      <div className="right-details-card">
+                        {/* Transcript (raw audio as-is) */}
+                        <div className="detail-section">
+                          <h4>Transcript</h4>
+                          <div className="transcript-editable">
+                            <p className="transcript-text">{d.raw_asr_text || d.transcript || 'No transcript.'}</p>
+                            <button className="transcript-edit-btn" onClick={() => startConversationEdit(d.conversation_id, d.raw_asr_text || d.transcript || '')}>
+                              <Pencil size={12} /> Edit & Re-analyze
+                            </button>
+                          </div>
                         </div>
-                      )}
-                    </div>
-                  )}
+
+                        {/* Risk & Metrics */}
+                        <div className="detail-section">
+                          <h4>Risk & Strategy</h4>
+                          <div className="detail-metric-grid">
+                            <div className="metric-item">
+                              <span className="metric-label">Risk Level</span>
+                              <span className="metric-value" style={{ color: riskColor(d.risk_level) }}>{d.risk_level || 'LOW'}</span>
+                            </div>
+                            <div className="metric-item">
+                              <span className="metric-label">Confidence</span>
+                              <span className="metric-value">{Math.round((d.confidence_score || 0) * 100)}%</span>
+                            </div>
+                            <div className="metric-item">
+                              <span className="metric-label">Sentiment</span>
+                              <span className="metric-value">{d.financial_sentiment || 'Neutral'}</span>
+                            </div>
+                            <div className="metric-item">
+                              <span className="metric-label">Intent</span>
+                              <span className="metric-value">{d.strategic_intent || 'N/A'}</span>
+                            </div>
+                          </div>
+                          {d.risk_assessment && <p className="detail-sub">{d.risk_assessment}</p>}
+                        </div>
+
+                        {/* Sentiment Breakdown */}
+                        <div className="detail-section">
+                          <h4>Sentiment</h4>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', fontWeight: 'bold', textTransform: 'capitalize', color: d.financial_sentiment?.includes('neg') ? '#ff4ecd' : d.financial_sentiment?.includes('pos') ? '#00ff9c' : '#f8fafc' }}>
+                             {d.financial_sentiment || 'Neutral'}
+                             <span style={{ color: '#94a3b8', fontWeight: 'normal' }}>({Math.round(Math.max(sb.positive || 0, sb.negative || 0, sb.neutral || 0) * 100)}%)</span>
+                          </div>
+                        </div>
+
+                        {/* Entities */}
+                        {ents.length > 0 && (
+                          <div className="detail-section">
+                            <h4>Entities</h4>
+                            <div className="entity-chips">
+                              {ents.slice(0, 10).map((e, i) => (
+                                <span key={i} className="entity-chip">
+                                  <strong>{e.type}</strong>: {e.value}
+                                  {e.confidence && <small> ({Math.round(e.confidence * 100)}%)</small>}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Topic Candidates */}
+                        {d.topic_top3 && d.topic_top3.length > 0 && (
+                          <div className="detail-section">
+                            <h4>Topics</h4>
+                            <div className="topic-list">
+                              {d.topic_top3.map((t, i) => (
+                                <div key={i} className="topic-row">
+                                  <span>{t.topic}</span>
+                                  <div className="bar-track small"><div className="bar-fill topic" style={{ width: `${Math.round(t.score * 100)}%` }}></div></div>
+                                  <span>{Math.round(t.score * 100)}%</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Qwen Expert Reasoning */}
+                        {d.expert_reasoning_points && (
+                          <details className="detail-section reasoning-collapse">
+                            <summary><h4 style={{ display: 'inline' }}>Expert Reasoning</h4></summary>
+                            <p className="reasoning-text">{d.expert_reasoning_points}</p>
+                          </details>
+                        )}
+
+                        {/* Quality Metrics */}
+                        {qm.overall_quality_score !== undefined && (
+                          <div className="detail-section">
+                            <h4>Quality Metrics</h4>
+                            <div className="detail-metric-grid">
+                              <div className="metric-item">
+                                <span className="metric-label">Quality</span>
+                                <span className="metric-value">{qm.quality_tier || 'N/A'}</span>
+                              </div>
+                              <div className="metric-item">
+                                <span className="metric-label">ASR Conf.</span>
+                                <span className="metric-value">{Math.round((qm.asr_confidence || 0) * 100)}%</span>
+                              </div>
+                              <div className="metric-item">
+                                <span className="metric-label">NER Coverage</span>
+                                <span className="metric-value">{Math.round(qm.ner_coverage_pct || (ents.length > 0 ? Math.min(100, ents.length * 20) : 0))}%</span>
+                              </div>
+                              <div className="metric-item">
+                                <span className="metric-label">ROUGE-1</span>
+                                <span className="metric-value">{Math.round((qm.rouge1_recall || 0) * 100)}%</span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Future Outlook */}
+                        {d.future_gearing && (
+                          <div className="detail-section">
+                            <h4>Future Outlook</h4>
+                            <p>{d.future_gearing}</p>
+                          </div>
+                        )}
+
+                        {/* Language */}
+                        <div className="detail-section">
+                          <h4>Language</h4>
+                          <p>
+                            {d.language === 'HI' && /[a-z]/i.test(d.transcript || d.raw_asr_text || '') ? 'HINGLISH (HI)' : String(d.language || 'unknown').toUpperCase()} — {Math.round((d.language_confidence || 0) * 100)}% confidence
+                          </p>
+                          <p className="detail-sub">Latency: {(d.timing?.total_s || 0).toFixed(2)}s</p>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </aside>
               )}
             </div>

@@ -66,13 +66,22 @@ for each row
 execute function public.enforce_ai_quality_metrics_conversation_exists();
 
 -- Emulate ON DELETE CASCADE for conversation_id.
+-- Only delete metrics when the LAST message row for a conversation_id is removed,
+-- preventing over-deletion during partial message cleanup.
 create or replace function public.cascade_delete_ai_quality_metrics_by_conversation_id()
 returns trigger
 language plpgsql
 as $$
 begin
-  delete from public.ai_conversation_quality_metrics q
-  where q.conversation_id = old.conversation_id;
+  -- Only cascade when no more message rows remain for this conversation_id.
+  if not exists (
+    select 1
+    from public.ai_conversation_messages m
+    where m.conversation_id = old.conversation_id
+  ) then
+    delete from public.ai_conversation_quality_metrics q
+    where q.conversation_id = old.conversation_id;
+  end if;
   return old;
 end;
 $$;

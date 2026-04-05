@@ -1,4 +1,4 @@
-import { Activity, BarChart3, LogOut, MessageSquare, Plus, Settings, UserRound, Trash2 } from 'lucide-react';
+import { Activity, BarChart3, LogOut, MessageSquare, Plus, UserRound, Trash2 } from 'lucide-react';
 import {
   Sidebar,
   SidebarContent,
@@ -61,9 +61,7 @@ export function AppSidebar({
           <button className={`side-tab ${view === 'insights' ? 'active' : ''}`} onClick={() => onViewChange('insights')}>
             <BarChart3 size={14} /> {!collapsed ? 'Call Insights' : ''}
           </button>
-          <button className={`side-tab ${view === 'settings' ? 'active' : ''}`} onClick={() => onViewChange('settings')}>
-            <Settings size={14} /> {!collapsed ? 'Settings' : ''}
-          </button>
+
         </SidebarGroup>
       </SidebarHeader>
 

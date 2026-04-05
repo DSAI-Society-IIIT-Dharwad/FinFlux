@@ -36,6 +36,9 @@ COLORS = {
     'RESET': '\033[0m',
 }
 
+# Global validation result tracker
+VALIDATION_RESULTS = {"pass": 0, "fail": 0, "skip": 0, "zero_data": 0}
+
 def print_header(text: str, level: int = 1):
     if level == 1:
         print(f"\n{COLORS['CYAN']}{'='*80}")
@@ -108,11 +111,14 @@ def validate_all_tables():
         
         if total_rows > 0:
             print_pass(f"Using BRIDGE TABLES (service-role pattern)")
+            VALIDATION_RESULTS["pass"] += 1
         else:
             print_warn(f"No data in bridge tables - save a conversation first!")
+            VALIDATION_RESULTS["zero_data"] += 1
         
     except Exception as e:
         print_fail(f"Table status check failed: {e}")
+        VALIDATION_RESULTS["fail"] += 1
 
 # ============================================================================
 # VALIDATION 2: VECTOR EMBEDDINGS
@@ -126,6 +132,7 @@ def validate_embeddings():
         
         if not convs:
             print_warn("No conversations found - skipping embedding validation")
+            VALIDATION_RESULTS["zero_data"] += 1
             return
         
         print_info(f"Checking {len(convs)} conversations for embeddings\n")
@@ -185,6 +192,7 @@ def validate_semantic_search():
         
         if not convs:
             print_warn("No conversations found - skipping semantic search test")
+            VALIDATION_RESULTS["zero_data"] += 1
             return
         
         test_queries = [
@@ -285,6 +293,7 @@ def validate_quality_metrics():
         
         if not convs:
             print_warn("No conversations found - skipping quality metrics validation")
+            VALIDATION_RESULTS["zero_data"] += 1
             return
         
         print_info(f"Analyzing {len(convs)} conversations for quality metric JSONB data\n")
@@ -503,6 +512,20 @@ def main():
     showcase_complete_flow()
     
     print_header("VALIDATION COMPLETE", level=1)
+
+    total_zero = VALIDATION_RESULTS["zero_data"]
+    total_fail = VALIDATION_RESULTS["fail"]
+
+    if total_fail > 0:
+        status_color = COLORS['RED']
+        status_text = "NOT READY — FAILURES DETECTED"
+    elif total_zero > 0:
+        status_color = COLORS['YELLOW']
+        status_text = f"PARTIAL — {total_zero} VALIDATION(S) HAD ZERO DATA PATHS"
+    else:
+        status_color = COLORS['GREEN']
+        status_text = "READY FOR PRODUCTION"
+
     print(f"""
 {COLORS['GREEN']}Summary of Tests Performed:{COLORS['RESET']}
   [OK] All Supabase tables queried for row counts
@@ -519,7 +542,7 @@ def main():
   3. Check embeddings after 2-3 seconds (async generation)
   4. Test RAG with custom queries
   
-{COLORS['GREEN']}System Status: READY FOR PRODUCTION{COLORS['RESET']}
+{status_color}System Status: {status_text}{COLORS['RESET']}
 """)
 
 if __name__ == '__main__':

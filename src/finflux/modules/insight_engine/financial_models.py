@@ -48,15 +48,15 @@ class ProductionExpertModule:
         # Stage 2: Topic & Advice Classification (DeBERTa v3)
         self.topic_pipe = make_pipeline("zero-shot-classification", model=config.HF_ZERO_SHOT, device=self.device)
         self.topic_level1_labels = [
-            "DEBT_MANAGEMENT",
-            "INVESTMENT_PLANNING",
-            "INSURANCE_PROTECTION",
-            "TAX_PLANNING",
-            "BUDGETING",
-            "ASSET_PURCHASE",
-            "RETIREMENT",
-            "EMERGENCY_FUND",
-            "GENERAL_FINANCIAL",
+            "DEBT_MANAGEMENT (Loan, EMI, कर्ज)",
+            "INVESTMENT_PLANNING (SIP, Mutual Fund, निवेश)",
+            "INSURANCE_PROTECTION (Premium, Policy, क्लैम, बीमा)",
+            "TAX_PLANNING (GST, ITR, टैक्स)",
+            "BUDGETING (Expenses, Salary, बजट, खर्च)",
+            "ASSET_PURCHASE (Property, Gold, Car, संपत्ति)",
+            "RETIREMENT (NPS, Pension, रिटायरमेंट)",
+            "EMERGENCY_FUND (Savings, बचत)",
+            "GENERAL_FINANCIAL (Finance, बैंकिंग)",
         ]
         self.topic_level2_labels = [
             "home_loan",
@@ -100,6 +100,7 @@ class ProductionExpertModule:
             "किस्त", "ब्याज", "बचत", "निवेश", "ऋण", "कर्ज", "आय", "खर्च", "बीमा", "प्रीमियम", "कर", "टैक्स",
             "होम लोन", "पर्सनल लोन", "क्रेडिट कार्ड", "म्यूचुअल फंड", "सिप", "एफडी", "पीपीएफ", "एनपीएस", "रिटायरमेंट",
             "डाउन पेमेंट", "इमरजेंसी फंड", "रेटन", "रिटर्न", "लाभ", "हानि", "जोखिम", "सम्पत्ति", "संपत्ति", "बैंक",
+            "क्रिप्टो", "शेयर", "पोर्टफोलियो", "मार्केट", "बाजार", "जीएसटी", "फंड",
             "emi", "sip amount", "loan amount", "interest pa", "percent returns", "tax section", "fund name", "bank name",
             "insurance premium", "fd amount", "investment goal", "expense category", "monthly income", "monthly savings",
             "cash", "wallet", "networth", "wealth", "financial", "finance", "advisor", "advice", "planning", "goal",
@@ -119,7 +120,20 @@ class ProductionExpertModule:
         # Disabled models (skip loading to save VRAM/stability)
         self.ner_general = None
         self.indic_ner = None
-        self.stt_pipe: Optional[Any] = None
+
+        # Stage 5: Local ASR Fallback (Whisper-small for cloud failure resilience)
+        try:
+            from transformers import pipeline as hf_pipeline
+            stt_device = 0 if self.device == 0 else -1
+            self.stt_pipe = hf_pipeline(
+                "automatic-speech-recognition",
+                model="openai/whisper-small",
+                device=stt_device,
+            )
+            print("[ProductionExpertModule] Local ASR fallback (whisper-small) loaded.")
+        except Exception as stt_err:
+            print(f"[ProductionExpertModule] Local ASR fallback unavailable: {stt_err}")
+            self.stt_pipe = None
 
         # Consolidated labels for GLiNER semantic extraction (High-Resolution V4.2+)
         self.labels = [
@@ -177,12 +191,31 @@ class ProductionExpertModule:
             if val:
                 results.append({"type": "INTEREST RATE", "value": val, "confidence": 0.90, "source": "rule_based"})
 
+        # Financial keywords rule-based extractor
+        keywords = {
+            "GST": "TAX ENTITY",
+            "ITR": "COMPLIANCE",
+            "TDS": "TAX ENTITY",
+            "Income Tax": "TAX ENTITY",
+            "Mutual Fund": "FUND NAME",
+            "SIP": "INVESTMENT TYPE",
+            "FD": "INVESTMENT TYPE",
+            "Crypto": "ASSET CLASS",
+            "Bitcoin": "ASSET CLASS",
+            "Portfolio": "FINANCIAL PROFILE",
+        }
+        for kw, etype in keywords.items():
+            if re.search(rf"\b{re.escape(kw)}\b", text, flags=re.IGNORECASE):
+                results.append({"type": etype, "value": kw, "confidence": 0.85, "source": "rule_based"})
+
         # Hindi financial terms mapping.
         hindi_terms = {
             "किस्त": "EMI AMOUNT",
             "ब्याज": "INTEREST RATE",
             "बचत": "MONTHLY SAVINGS",
             "निवेश": "INVESTMENT GOAL",
+            "जीएसटी": "TAX ENTITY",
+            "क्रिप्टो": "ASSET CLASS",
         }
         for term, mapped_type in hindi_terms.items():
             for _ in re.finditer(re.escape(term), text):
@@ -196,14 +229,21 @@ class ProductionExpertModule:
         return list(dedup.values())
 
     def transcribe_local(self, audio_path: str) -> str:
-        """Local ASR fallback using Whisper-Hindi-Small."""
-        if not hasattr(self, 'stt_pipe') or self.stt_pipe is None: return ""
+        """Local ASR fallback using Whisper-small."""
+        if not hasattr(self, 'stt_pipe') or self.stt_pipe is None:
+            raise RuntimeError(
+                "Local ASR fallback is not available: stt_pipe was not initialized. "
+                "Ensure 'openai/whisper-small' can be loaded or set DEMO_MODE=true."
+            )
         try:
             res = self.stt_pipe(audio_path)
-            return res.get("text", "")
+            text = res.get("text", "") if isinstance(res, dict) else str(res)
+            if not text.strip():
+                print("[ProductionExpertModule] Local STT returned empty transcript")
+            return text
         except Exception as e:
             print(f"[ProductionExpertModule] Local STT Error: {e}")
-            return ""
+            raise RuntimeError(f"Local ASR transcription failed: {e}") from e
 
     def _gliner_safe(self, text: str) -> list:
         """Split text into chunks of max 300 chars to avoid GLiNER memory/token issues."""
