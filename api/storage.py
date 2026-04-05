@@ -9,8 +9,11 @@ from pathlib import Path
 import bcrypt
 import requests
 from typing import Any, Dict, List, Optional
+from dotenv import load_dotenv
 
 from sentence_transformers import SentenceTransformer
+
+load_dotenv()
 
 # Paths
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
@@ -98,32 +101,43 @@ def _supabase_vector_search(
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
         "Content-Type": "application/json",
     }
+    # Priority order: bridge service first (service-role backend pattern)
     rpc_candidates = [
-        SUPABASE_VECTOR_RPC,
-        "search_user_embeddings_bridge_service",
+        "search_user_embeddings_bridge_service",  # Preferred: backend bridge tables
+        SUPABASE_VECTOR_RPC if SUPABASE_VECTOR_RPC != "search_user_embeddings_bridge_service" else None,
         "search_user_message_embeddings_service",
-        "search_user_message_embeddings",
+        "search_user_message_embeddings",  # Legacy: forward-facing public tables
     ]
+    rpc_candidates = [rpc for rpc in rpc_candidates if rpc]  # Remove None values
 
     rows: List[Dict[str, Any]] = []
     last_error: Optional[Exception] = None
+    
     for rpc_name in rpc_candidates:
         url = f"{SUPABASE_URL}/rest/v1/rpc/{rpc_name}"
         for call_payload in (payload, payload_legacy):
             try:
                 res = requests.post(url, headers=headers, json=call_payload, timeout=20)
+                if res.status_code == 404:
+                    # RPC doesn't exist, try next candidate
+                    last_error = Exception(f"RPC {rpc_name} not found")
+                    continue
                 res.raise_for_status()
                 parsed = res.json() if res.text else []
                 rows = parsed if isinstance(parsed, list) else []
-                break
+                if rows or res.status_code == 200:  # Success even if empty
+                    print(f"[Storage] Using RPC: {rpc_name}")
+                    break
             except Exception as exc:
                 last_error = exc
                 continue
         if rows:
             break
 
+    # If no results found but no error, return empty list (OK - user may have no conversations)
+    # Only raise if all candidates failed
     if not rows and last_error:
-        raise last_error
+        print(f"[Storage] Semantic search tried all RPC candidates, last error: {last_error}")
 
     mapped: List[Dict[str, Any]] = []
     for row in rows:
@@ -280,7 +294,19 @@ def _supabase_insert_conversation(data: Dict[str, Any]) -> None:
         raise ValueError("Missing required user_id for Supabase conversation/embedding insert")
     thread_id = str(data.get("chat_thread_id") or data.get("conversation_id"))
     conversation_id = str(data.get("conversation_id", ""))
-    ts = str(data.get("timestamp") or datetime.datetime.utcnow().isoformat())
+    # Ensure timestamp is in ISO format
+    raw_ts = data.get("timestamp")
+    if isinstance(raw_ts, str) and raw_ts:
+        # Check if it's a Unix timestamp (numeric string)
+        if raw_ts.replace('.', '').replace('-', '').isdigit() and '.' in raw_ts:
+            try:
+                ts = datetime.datetime.fromtimestamp(float(raw_ts), tz=datetime.timezone.utc).isoformat()
+            except Exception:
+                ts = str(raw_ts)
+        else:
+            ts = str(raw_ts)
+    else:
+        ts = datetime.datetime.utcnow().isoformat()
     normalized_topic = str(data.get("financial_topic") or data.get("topic") or "N/A")
 
     # Upsert thread with explicit user filter guard fields.

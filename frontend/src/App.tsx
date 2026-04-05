@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, BarChart3, ChevronLeft, ChevronRight, Loader2, LogOut, MessageSquare, Mic, Pause, Play, Plus, Send, Settings, Shield, UserRound, Volume2 } from 'lucide-react';
+import { Activity, BarChart3, ChevronLeft, ChevronRight, Loader2, LogOut, MessageSquare, Mic, Pause, Play, Plus, Send, Settings, Shield, UserRound } from 'lucide-react';
 
 type ViewMode = 'chat' | 'insights' | 'settings';
 
@@ -112,7 +112,7 @@ function App() {
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [recordingLevels, setRecordingLevels] = useState<number[]>(Array.from({ length: 28 }, () => 0.06));
   const [error, setError] = useState('');
-  const [voiceReplyOn, setVoiceReplyOn] = useState(true);
+  const [voiceReplyOn] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [editingConversationId, setEditingConversationId] = useState('');
   const [editTranscript, setEditTranscript] = useState('');
@@ -302,8 +302,8 @@ function App() {
         text: r.text,
         attachedResult: r.attached_result,
       })));
-      const firstAnalysis = rows.find((r) => r.role === 'assistant' && r.attached_result)?.attached_result;
-      if (firstAnalysis) setSelectedDetail(firstAnalysis);
+      const latestAnalysis = [...rows].reverse().find((r) => r.role === 'assistant' && r.attached_result)?.attached_result;
+      setSelectedDetail(latestAnalysis || null);
       setActiveThreadId(threadId);
       setView('chat');
     } catch (e) {
@@ -345,6 +345,10 @@ function App() {
       cancelTranscriptEdit();
       await loadHistory();
       if (activeThreadId) await openHistoryThread(activeThreadId);
+      setSelectedDetail((prev) => {
+        if (!prev || prev.conversation_id !== conversationId) return prev;
+        return { ...prev, transcript: editTranscript };
+      });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -769,37 +773,36 @@ function App() {
               {messages.length === 0 && (
                 <div className="empty-state">
                   <h2>How can I help with your financial call intelligence?</h2>
-                  <p>Type a message or use audio to run full pipeline analysis.</p>
+                  <p>Type your query to generate transcript-based risk insights and summaries.</p>
                 </div>
               )}
               {messages.map((msg) => (
                 <div key={msg.id} className={`msg ${msg.role}`}>
                   <div className="msg-bubble" onClick={() => msg.attachedResult && setSelectedDetail(msg.attachedResult)}>
                     <p>{msg.text}</p>
-                    {msg.role === 'assistant' && (
-                      <button className="speak-btn" onClick={() => speak(msg.text, msg.attachedResult)}>
-                        <Volume2 size={14} /> Play voice
-                      </button>
-                    )}
                     {msg.attachedResult?.response_mode === 'analysis' && (
                       <>
                         <div className="msg-metrics">
                           <span>Topic: {msg.attachedResult.financial_topic}</span>
                           <span>Risk: {msg.attachedResult.risk_level}</span>
                           <span>Confidence: {Math.round((msg.attachedResult.confidence_score || 0) * 100)}%</span>
-                          <button
-                            className="details-toggle"
-                            onClick={() => beginTranscriptEdit(msg.attachedResult!.conversation_id, msg.attachedResult!.transcript || '')}
-                          >
-                            Edit transcript
-                          </button>
                           <button className="details-toggle" onClick={() => toggleExpanded(msg.id)}>
                             {expanded[msg.id] ? 'Hide details' : 'Show details'}
                           </button>
                         </div>
 
                         <div className="quick-transcript">
-                          <div className="quick-transcript-title">Transcript</div>
+                          <div className="quick-transcript-title">
+                            <span>Transcript</span>
+                            {editingConversationId !== msg.attachedResult.conversation_id && (
+                              <button
+                                className="details-toggle"
+                                onClick={() => beginTranscriptEdit(msg.attachedResult!.conversation_id, msg.attachedResult!.transcript || '')}
+                              >
+                                Edit + Regenerate Summary
+                              </button>
+                            )}
+                          </div>
                           {editingConversationId === msg.attachedResult.conversation_id ? (
                             <>
                               <textarea
@@ -810,7 +813,7 @@ function App() {
                               />
                               <div className="transcript-actions">
                                 <button onClick={() => saveTranscriptEdit(msg.attachedResult!.conversation_id)} disabled={isSavingEdit}>
-                                  {isSavingEdit ? 'Saving...' : 'Save + Reanalyze'}
+                                  {isSavingEdit ? 'Saving...' : 'Save + Regenerate Summary'}
                                 </button>
                                 <button onClick={cancelTranscriptEdit}>Cancel</button>
                               </div>
@@ -867,8 +870,8 @@ function App() {
               <div className="audio-first-panel">
                 <div className="audio-panel-head">
                   <div>
-                    <div className="audio-title">Audio First Capture</div>
-                    <div className="audio-subtitle">Record the call input first, then add optional text below</div>
+                    <div className="audio-title">Audio Recorder</div>
+                    <div className="audio-subtitle">Record in Hindi/English with live spikes, then send for analysis</div>
                   </div>
                   <div className="recording-time">{`${Math.floor(recordingSeconds / 60).toString().padStart(2, '0')}:${(recordingSeconds % 60).toString().padStart(2, '0')}`}</div>
                 </div>
@@ -882,7 +885,7 @@ function App() {
                 <div className="audio-panel-actions">
                   {!isRecording ? (
                     <button className="audio-btn" onClick={startRecord} disabled={isSending}>
-                      <Mic size={16} /> Start Recording
+                      <Mic size={16} /> Start
                     </button>
                   ) : (
                     <>
@@ -890,7 +893,7 @@ function App() {
                         {isRecordPaused ? <Play size={16} /> : <Pause size={16} />} {isRecordPaused ? 'Resume' : 'Pause'}
                       </button>
                       <button className="audio-btn recording" onClick={stopRecord}>
-                        <Mic size={16} /> Stop & Send
+                        <Mic size={16} /> Send
                       </button>
                       <button className="audio-cancel-btn" onClick={cancelRecord}>Cancel</button>
                     </>
@@ -911,12 +914,6 @@ function App() {
                 rows={2}
               />
               <div className="composer-actions">
-                <button className={`voice-toggle ${voiceReplyOn ? 'on' : ''}`} onClick={() => setVoiceReplyOn((v) => !v)}>
-                  <Volume2 size={16} /> Voice reply {voiceReplyOn ? 'On' : 'Off'}
-                </button>
-                <button className={`audio-btn ${isRecording ? 'recording' : ''}`} onClick={isRecording ? stopRecord : startRecord}>
-                  <Mic size={16} /> {isRecording ? 'Stop' : 'Audio'}
-                </button>
                 <button className="send-btn" onClick={sendText} disabled={isSending || !input.trim()}>
                   {isSending ? <Loader2 className="spin" size={16} /> : <Send size={16} />} Send
                 </button>
@@ -928,14 +925,44 @@ function App() {
               {!selectedDetail && <p className="detail-placeholder">Select an analysis response to view full risk, entities, and strategic context.</p>}
               {selectedDetail && (
                 <div className="right-details-card">
-                  <button className="speak-btn right-speak" onClick={() => speak(selectedDetail.executive_summary || selectedDetail.transcript || '', selectedDetail)}>
-                    <Volume2 size={14} /> Play insight voice
-                  </button>
+                  <div className="quick-transcript right-transcript">
+                    <div className="quick-transcript-title">
+                      <span>Full Transcript</span>
+                      {editingConversationId !== selectedDetail.conversation_id && (
+                        <button
+                          className="details-toggle"
+                          onClick={() => beginTranscriptEdit(selectedDetail.conversation_id, selectedDetail.transcript || '')}
+                        >
+                          Edit + Regenerate Summary
+                        </button>
+                      )}
+                    </div>
+                    {editingConversationId === selectedDetail.conversation_id ? (
+                      <>
+                        <textarea
+                          className="transcript-editor"
+                          value={editTranscript}
+                          onChange={(e) => setEditTranscript(e.target.value)}
+                          rows={8}
+                        />
+                        <div className="transcript-actions">
+                          <button onClick={() => saveTranscriptEdit(selectedDetail.conversation_id)} disabled={isSavingEdit}>
+                            {isSavingEdit ? 'Saving...' : 'Save + Regenerate Summary'}
+                          </button>
+                          <button onClick={cancelTranscriptEdit}>Cancel</button>
+                        </div>
+                      </>
+                    ) : (
+                      <p className="quick-transcript-text">{selectedDetail.transcript || 'No transcript available.'}</p>
+                    )}
+                  </div>
+
+                  <p><strong>Summary:</strong> {selectedDetail.executive_summary || 'N/A'}</p>
                   <p><strong>Topic:</strong> {selectedDetail.financial_topic || 'N/A'}</p>
                   <p><strong>Risk:</strong> {selectedDetail.risk_level || 'LOW'}</p>
-                  <p><strong>Sentiment:</strong> {selectedDetail.financial_sentiment || 'Neutral'}</p>
                   <p><strong>Confidence:</strong> {Math.round((selectedDetail.confidence_score || 0) * 100)}%</p>
-                  <p><strong>Summary:</strong> {selectedDetail.executive_summary || 'N/A'}</p>
+                  <p><strong>Sentiment:</strong> {selectedDetail.financial_sentiment || 'Neutral'}</p>
+                  <p><strong>Language:</strong> {String(selectedDetail.language || 'unknown').toUpperCase()}</p>
                   <p><strong>Strategic Intent:</strong> {selectedDetail.strategic_intent || 'N/A'}</p>
                   <p><strong>Future Gearing:</strong> {selectedDetail.future_gearing || 'N/A'}</p>
                   <p><strong>Risk Assessment:</strong> {selectedDetail.risk_assessment || 'N/A'}</p>
@@ -1024,6 +1051,7 @@ function App() {
                   <p><strong>Risk:</strong> {selectedInsightConversation.risk_level}</p>
                   <p><strong>Confidence:</strong> {Math.round((selectedInsightConversation.confidence_score || 0) * 100)}%</p>
                   <p><strong>Summary:</strong> {selectedInsightConversation.executive_summary}</p>
+                  <p><strong>Transcript:</strong> {selectedInsightConversation.transcript || 'No transcript available.'}</p>
                   <p><strong>Sentiment:</strong> {selectedInsightConversation.financial_sentiment || 'N/A'}</p>
                   <p><strong>Pipeline Latency:</strong> {(selectedInsightConversation.timing?.total_s || 0).toFixed(2)}s</p>
                   <p><strong>Thread:</strong> {selectedInsightConversation.chat_thread_id || 'N/A'}</p>
