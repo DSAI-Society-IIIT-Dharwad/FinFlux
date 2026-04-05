@@ -481,6 +481,9 @@ input::placeholder, textarea::placeholder {
   display: grid;
   gap: 12px;
   align-content: start;
+  position: sticky;
+  top: 0;
+  max-height: 100vh;
 }
 
 .chat-right-pane h3 {
@@ -645,11 +648,19 @@ input::placeholder, textarea::placeholder {
 }
 
 .quick-transcript-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 12px;
   color: #93c5fd;
   text-transform: uppercase;
   font-weight: 700;
   letter-spacing: 0.04em;
+}
+
+.right-transcript .quick-transcript-text {
+  max-height: 320px;
 }
 
 .quick-transcript-text {
@@ -1050,5 +1061,7 @@ input::placeholder, textarea::placeholder {
   .chat-right-pane {
     border-left: none;
     border-top: 1px solid rgba(255, 255, 255, 0.08);
+    position: static;
+    max-height: none;
   }
 }

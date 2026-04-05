@@ -15,6 +15,13 @@ create table if not exists public.ai_conversation_quality_metrics (
   overall_quality_score numeric,
   quality_tier text check (quality_tier in ('EXCELLENT','GOOD','ACCEPTABLE','LOW')),
   model_versions jsonb not null default '{}'::jsonb,
+  metadata_jsonb jsonb default '{
+    "quality_metrics": {},
+    "overall_score": null,
+    "tier": null,
+    "timestamp_extracted": null,
+    "source": null
+  }'::jsonb,
   created_at timestamptz not null default now()
 );
 
