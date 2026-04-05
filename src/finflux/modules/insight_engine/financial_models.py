@@ -6,6 +6,7 @@ import re
 from typing import Dict, Any, List, Optional, cast
 from transformers import pipeline
 from finflux import config
+from finflux.modules.financial_nlp import FinancialNLPAnalyzer, FinancialNLPResult
 
 try:
     from gliner import GLiNER
@@ -74,6 +75,8 @@ class ProductionExpertModule:
             "RISK LEVEL", "FUND CATEGORY", "LOCK IN PERIOD"
         ]
 
+        self.financial_nlp = FinancialNLPAnalyzer(max_chars=config.FINANCIAL_NLP_MAX_CHARS)
+
     def transcribe_local(self, audio_path: str) -> str:
         """Local ASR fallback using Whisper-Hindi-Small."""
         if not hasattr(self, 'stt_pipe') or self.stt_pipe is None: return ""
@@ -107,6 +110,24 @@ class ProductionExpertModule:
             except Exception:
                 continue
         return all_entities
+
+    @staticmethod
+    def _merge_entity_lists(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        for item in primary + secondary:
+            entity_type = str(item.get("type", "")).strip().upper()
+            value = str(item.get("value", "")).strip()
+            if not entity_type or not value:
+                continue
+            key = (entity_type, value.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+
+        return merged
 
     def process(self, text: str) -> Dict[str, Any]:
         """Run the full integrated pipeline with lazy loading."""
@@ -167,6 +188,23 @@ class ProductionExpertModule:
                         "confidence": float(ent.get("score", 0.0))
                     })
 
+            # 5. Rule-based financial NLP for exact term, parameter, and topic detection
+            if config.FINANCIAL_NLP_ENABLE_RULES:
+                financial_nlp_result = self.financial_nlp.analyze(safe_text, detected_language=detected_lang)
+            else:
+                financial_nlp_result = FinancialNLPResult(
+                    detected_language=detected_lang,
+                    finance_topic=top_topic,
+                    topic_confidence=float(confidence_score),
+                    topic_scores=topic_top3,
+                    terms=[],
+                    entities=[],
+                    parameters={"amounts": [], "rates": [], "tenures": [], "dates": [], "institutions": [], "products": []},
+                    is_finance_related=top_topic != "general",
+                )
+            rule_entities = financial_nlp_result.entities
+            merged_entities = self._merge_entity_lists(ner_items, rule_entities)
+
             model_attribution = {
                 "xlm_roberta": {
                     "detected_language": detected_lang,
@@ -181,7 +219,13 @@ class ProductionExpertModule:
                     "breakdown": sentiment_map,
                 },
                 "gliner": {
-                    "entity_count": len(ner_items),
+                    "entity_count": len(merged_entities),
+                },
+                "financial_nlp": {
+                    "topic": financial_nlp_result.finance_topic,
+                    "topic_confidence": financial_nlp_result.topic_confidence,
+                    "term_count": len(financial_nlp_result.terms),
+                    "parameter_count": sum(len(values) for values in financial_nlp_result.parameters.values()),
                 },
                 "qwen": {
                     "reasoning_available": True,
@@ -197,7 +241,12 @@ class ProductionExpertModule:
                 "financial_sentiment": sentiment_label,
                 "sentiment_breakdown": sentiment_map,
                 "is_advice_request": advice_res["labels"][0] == "asking for financial advice" and advice_res["scores"][0] > 0.6,
-                "entities": ner_items,
+                "entities": merged_entities,
+                "financial_terms": financial_nlp_result.terms,
+                "financial_parameters": financial_nlp_result.parameters,
+                "financial_nlp_topic": financial_nlp_result.finance_topic,
+                "financial_nlp_topic_confidence": financial_nlp_result.topic_confidence,
+                "financial_nlp": financial_nlp_result.to_dict(),
                 "stt_engine": "Groq-Whisper (Primary)", # Metadata
                 "model_attribution": model_attribution,
             }

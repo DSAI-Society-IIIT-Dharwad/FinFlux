@@ -50,6 +50,9 @@ class ConversationLog(Base):
     risk_assessment = Column(Text)
     expert_reasoning = Column(Text)
     transcript = Column(Text) # High-resolution persistence
+    financial_terms = Column(Text)
+    financial_parameters = Column(Text)
+    financial_nlp_data = Column(Text)
     
     advice_request = Column(Boolean)
     injection_attempt = Column(Boolean)
@@ -100,9 +103,24 @@ def _ensure_sqlite_column(table_name: str, column_name: str, column_def: str):
 
 def _run_schema_migrations():
     # Keep backwards compatibility for existing analytics.db created before thread-aware chat.
+    _ensure_sqlite_column("conversations", "user_id", "TEXT")
     _ensure_sqlite_column("conversations", "chat_thread_id", "TEXT")
     _ensure_sqlite_column("conversations", "input_mode", "TEXT")
     _ensure_sqlite_column("conversations", "raw_user_input", "TEXT")
+    _ensure_sqlite_column("conversations", "financial_terms", "TEXT")
+    _ensure_sqlite_column("conversations", "financial_parameters", "TEXT")
+    _ensure_sqlite_column("conversations", "financial_nlp_data", "TEXT")
+
+    # Backfill legacy rows created before user scoping existed.
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                "UPDATE conversations "
+                "SET user_id = 'guest_001' "
+                "WHERE user_id IS NULL OR TRIM(user_id) = ''"
+            )
+        )
+        conn.commit()
 
 
 _run_schema_migrations()
@@ -167,6 +185,9 @@ def save_conversation(data):
             risk_assessment=data.get("risk_assessment", ""),
             expert_reasoning=data.get("expert_reasoning", ""),
             transcript=data.get("transcript", ""),
+            financial_terms=json.dumps(data.get("financial_terms", [])),
+            financial_parameters=json.dumps(data.get("financial_parameters", {})),
+            financial_nlp_data=json.dumps(data.get("financial_nlp", {})),
             
             advice_request=data["advice_request"],
             injection_attempt=data["injection_attempt"],
@@ -240,6 +261,9 @@ def search_memories(user_id: str, query_text: str, filters: dict = None, n_resul
                     "risk": log.risk_level,
                     "language": log.language,
                     "executive_summary": log.executive_summary,
+                    "financial_terms": json.loads(log.financial_terms or "[]"),
+                    "financial_parameters": json.loads(log.financial_parameters or "{}"),
+                    "financial_nlp": json.loads(log.financial_nlp_data or "{}"),
                     "similarity_score": round(1 - results["distances"][0][i], 2),
                     "entities": json.loads(log.entities or "[]")
                 })
@@ -274,6 +298,10 @@ def get_all_conversations(user_id: str = "guest_001"):
                 "expert_reasoning": r.expert_reasoning,
                 "expert_reasoning_points": r.expert_reasoning, # Frontend Consistency
                 "transcript": r.transcript,
+                "financial_terms": json.loads(r.financial_terms or "[]"),
+                "financial_parameters": json.loads(r.financial_parameters or "{}"),
+                "financial_nlp": json.loads(r.financial_nlp_data or "{}"),
+                "financial_nlp_topic": (json.loads(r.financial_nlp_data or "{}").get("topic") if isinstance(json.loads(r.financial_nlp_data or "{}"), dict) else None),
                 "advice_request": r.advice_request,
                 "injection_attempt": r.injection_attempt,
                 "confidence_score": r.confidence_score,

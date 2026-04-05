@@ -25,3 +25,5 @@ HF_INDIC_STT          = None  # skip, not downloaded
 # ── CONFIG ────────────────────────────────────────
 USE_CUDA              = os.environ.get("USE_CUDA", "true").lower() == "true"
 DEBUG_MODE            = os.environ.get("DEBUG_MODE", "false").lower() == "true"
+FINANCIAL_NLP_MAX_CHARS = int(os.environ.get("FINANCIAL_NLP_MAX_CHARS", "1200"))
+FINANCIAL_NLP_ENABLE_RULES = os.environ.get("FINANCIAL_NLP_ENABLE_RULES", "true").lower() == "true"

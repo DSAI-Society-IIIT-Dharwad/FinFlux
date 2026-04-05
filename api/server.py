@@ -182,6 +182,11 @@ def _build_analysis_result(
         "risk_level": analysis.get("risk_level", "LOW"),
         "financial_sentiment": nlp_res.get("financial_sentiment", "Neutral"),
         "sentiment_breakdown": nlp_res.get("sentiment_breakdown", {}),
+        "financial_terms": nlp_res.get("financial_terms", []),
+        "financial_parameters": nlp_res.get("financial_parameters", {}),
+        "financial_nlp_topic": nlp_res.get("financial_nlp_topic", nlp_res.get("topic", "N/A")),
+        "financial_nlp_topic_confidence": nlp_res.get("financial_nlp_topic_confidence", 0.0),
+        "financial_nlp": nlp_res.get("financial_nlp", {}),
         "advice_request": nlp_res.get("is_advice_request", False) or SECURITY.is_asking_for_advice(clean_text),
         "injection_attempt": injection_found,
         "entities": nlp_res.get("entities", []),
@@ -586,8 +591,10 @@ async def edit_transcript(conversation_id: str, payload: dict, current_user: str
             log.expert_reasoning = analysis.get("expert_reasoning_points", log.expert_reasoning)
             log.financial_topic = nlp_res.get("topic", log.financial_topic)
             log.financial_sentiment = nlp_res.get("financial_sentiment", log.financial_sentiment)
-            import json
             setattr(log, "entities", json.dumps(nlp_res.get("entities", [])))
+            setattr(log, "financial_terms", json.dumps(nlp_res.get("financial_terms", [])))
+            setattr(log, "financial_parameters", json.dumps(nlp_res.get("financial_parameters", {})))
+            setattr(log, "financial_nlp_data", json.dumps(nlp_res.get("financial_nlp", {})))
 
         db.commit()
         db.refresh(log)
@@ -608,8 +615,8 @@ async def edit_transcript(conversation_id: str, payload: dict, current_user: str
                 "future_gearing": log.future_gearing,
                 "risk_assessment": log.risk_assessment,
                 "expert_reasoning_points": log.expert_reasoning,
-                "timing": json.loads(log.timing_data or "{}"),
-                "entities": json.loads(log.entities or "[]"),
+                "timing": json.loads(str(log.timing_data or "{}")),
+                "entities": json.loads(str(log.entities or "[]")),
             },
         }
     finally:

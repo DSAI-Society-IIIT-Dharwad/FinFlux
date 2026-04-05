@@ -53,6 +53,11 @@ interface AnalysisResult {
   topic_top3?: TopicScore[];
   sentiment_breakdown?: SentimentBreakdown;
   model_attribution?: ModelAttribution;
+  financial_terms?: string[];
+  financial_parameters?: Record<string, string[]>;
+  financial_nlp_topic?: string;
+  financial_nlp_topic_confidence?: number;
+  financial_nlp?: Record<string, unknown>;
 }
 
 function encodeWavBlob(samples: Float32Array, sr: number): Blob {
@@ -230,6 +235,8 @@ export default function RecordView() {
   const pct = (value?: number) => `${Math.max(0, Math.min(100, Math.round((value ?? 0) * 100)))}%`;
   const safeTopics = (result?.model_attribution?.deberta?.top3_topics || result?.topic_top3 || []);
   const sentiment = result?.model_attribution?.finbert?.breakdown || result?.sentiment_breakdown || {};
+  const financialTerms = result?.financial_terms || [];
+  const financialParameters = result?.financial_parameters || {};
   const ragRows = ragResult?.retrieval?.results || [];
   const ragInsight = ragResult?.insight;
   const extractSummary = (doc?: string) => {
@@ -453,6 +460,66 @@ export default function RecordView() {
                       </span>
                     ))}
                   </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Financial NLP Output */}
+            <div className="glass-panel" style={{ padding: '28px', background: 'rgba(59,130,246,0.04)', border: '1px solid rgba(59,130,246,0.18)' }}>
+              <h4 style={{ marginBottom: '18px', display: 'flex', alignItems: 'center', gap: '10px', fontSize: '1rem', fontWeight: 900, color: '#60a5fa' }}>
+                <Tag size={18} /> Financial NLP Output
+              </h4>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <div>
+                  <div style={{ fontSize: '0.72rem', color: '#93c5fd', fontWeight: 900, marginBottom: '8px', letterSpacing: '0.05em' }}>DETECTED TERMS</div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                    {financialTerms.length === 0 ? (
+                      <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>No financial terms detected yet.</span>
+                    ) : financialTerms.slice(0, 14).map((term, index) => (
+                      <span key={`${term}-${index}`} style={{ padding: '6px 10px', borderRadius: '999px', background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.25)', color: '#bfdbfe', fontSize: '0.75rem', fontWeight: 700 }}>
+                        {term}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{ fontSize: '0.72rem', color: '#a7f3d0', fontWeight: 900, marginBottom: '8px', letterSpacing: '0.05em' }}>FINANCIAL PARAMETERS</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                    {[
+                      { label: 'amounts', color: '#38bdf8' },
+                      { label: 'rates', color: '#f59e0b' },
+                      { label: 'tenures', color: '#34d399' },
+                      { label: 'institutions', color: '#c084fc' },
+                      { label: 'products', color: '#fb7185' },
+                      { label: 'dates', color: '#f97316' },
+                    ].map(({ label, color }) => (
+                      <div key={label} style={{ padding: '12px', borderRadius: '14px', background: 'rgba(0,0,0,0.22)', border: '1px solid rgba(255,255,255,0.07)' }}>
+                        <div style={{ fontSize: '0.68rem', color, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '6px' }}>{label}</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                          {(financialParameters[label] || []).length === 0 ? (
+                            <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>None</span>
+                          ) : (
+                            financialParameters[label].slice(0, 4).map((value, idx) => (
+                              <span key={`${label}-${idx}-${value}`} style={{ fontSize: '0.75rem', padding: '5px 8px', borderRadius: '999px', background: 'rgba(255,255,255,0.04)', color: '#e2e8f0' }}>
+                                {value}
+                              </span>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                  <span style={{ padding: '5px 10px', borderRadius: '999px', fontSize: '0.7rem', fontWeight: 800, background: 'rgba(16,185,129,0.2)', color: '#86efac' }}>
+                    NLP Topic: {result?.financial_nlp_topic || result?.financial_topic || 'general'}
+                  </span>
+                  <span style={{ padding: '5px 10px', borderRadius: '999px', fontSize: '0.7rem', fontWeight: 800, background: 'rgba(168,85,247,0.2)', color: '#ddd6fe' }}>
+                    Topic Confidence: {Math.round((result?.financial_nlp_topic_confidence || 0) * 100)}%
+                  </span>
                 </div>
               </div>
             </div>
