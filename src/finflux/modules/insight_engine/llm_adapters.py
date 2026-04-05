@@ -4,10 +4,13 @@ import requests
 import json
 import re
 import tempfile
+from difflib import SequenceMatcher
+import numpy as np
+import soundfile as sf
+from scipy.signal import resample_poly
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 from finflux import config
-from pydub import AudioSegment
 
 class GroqWhisperAdapter:
     """Groq Whisper API for multilingual transcription."""
@@ -24,14 +27,21 @@ class GroqWhisperAdapter:
         max_seconds: Optional[int] = None,
     ) -> str:
         """Create a temporary WAV optimized for low upload size while preserving speech intelligibility."""
-        audio = AudioSegment.from_file(source_path)
+        audio, sr = sf.read(source_path, dtype="float32", always_2d=False)
+        if isinstance(audio, np.ndarray) and audio.ndim > 1 and channels == 1:
+            audio = np.mean(audio, axis=1)
         if max_seconds and max_seconds > 0:
-            audio = audio[: max_seconds * 1000]
-        audio = audio.set_frame_rate(frame_rate).set_channels(channels).set_sample_width(sample_width)
+            max_samples = int(max_seconds * sr)
+            audio = audio[:max_samples]
+        if sr != frame_rate:
+            audio = resample_poly(audio, frame_rate, sr).astype(np.float32)
+            sr = frame_rate
+
+        subtype = "PCM_16" if sample_width == 2 else "PCM_24" if sample_width == 3 else "PCM_32"
 
         fd, out_path = tempfile.mkstemp(prefix="finflux_stt_", suffix=".wav")
         os.close(fd)
-        audio.export(out_path, format="wav")
+        sf.write(out_path, audio, sr, subtype=subtype)
         return out_path
 
     def transcribe(self, audio_path: str, language: Optional[str] = None) -> Dict[str, Any]:
@@ -103,6 +113,8 @@ class GroqWhisperAdapter:
                         if not isinstance(w, dict):
                             continue
                         raw_prob = w.get("probability")
+                        if not isinstance(raw_prob, (int, float, str)):
+                            continue
                         try:
                             p = float(raw_prob)
                             if 0.0 <= p <= 1.0:
@@ -369,6 +381,30 @@ Rules:
             "latin": (latin / total) * 100.0,
         }
 
+    @staticmethod
+    def _normalize_for_similarity(text: str) -> str:
+        return re.sub(r"\s+", " ", str(text or "").strip().lower())
+
+    def _normalization_drift_too_high(self, original: str, cleaned: str) -> bool:
+        o = self._normalize_for_similarity(original)
+        c = self._normalize_for_similarity(cleaned)
+        if not c:
+            return True
+
+        ratio = SequenceMatcher(None, o, c).ratio()
+        len_ratio = len(c) / max(1, len(o))
+        if ratio < 0.72:
+            return True
+        if len_ratio < 0.6 or len_ratio > 1.6:
+            return True
+
+        o_nums = re.findall(r"\d+(?:\.\d+)?", o)
+        c_nums = re.findall(r"\d+(?:\.\d+)?", c)
+        if len(set(c_nums) - set(o_nums)) > 1:
+            return True
+
+        return False
+
     def normalize_transcript(
         self,
         transcript: str,
@@ -424,6 +460,9 @@ OUTPUT: corrected transcript text only."""
                 if out["devanagari"] + 25.0 < src["devanagari"] and out["latin"] + 25.0 < src["latin"]:
                     return transcript
 
+            if self._normalization_drift_too_high(transcript, cleaned):
+                return transcript
+
             return cleaned
         except:
             return transcript # Safe fallback
@@ -447,11 +486,81 @@ OUTPUT: corrected transcript text only."""
             
             data = json.loads(cleaned)
             for field, val in default_analysis.items():
-                if field not in data: data[field] = val
-            return data
+                if field not in data:
+                    data[field] = val
+            return self._sanitize_analysis_json(data)
         except Exception as e:
             print(f"[GroqExpert] JSON Parse Guard Triggered: {e}")
             return default_analysis
+
+    @staticmethod
+    def _clean_text_block(value: Any, max_chars: int = 700) -> str:
+        txt = re.sub(r"\s+", " ", str(value or "")).strip()
+        if len(txt) > max_chars:
+            txt = txt[:max_chars].rstrip() + "..."
+        return txt
+
+    @staticmethod
+    def _contains_devanagari(text: str) -> bool:
+        return bool(re.search(r"[\u0900-\u097F]", str(text or "")))
+
+    def _ensure_english_text(self, text: str, max_chars: int = 700) -> str:
+        cleaned = self._clean_text_block(text, max_chars=max_chars)
+        if not cleaned:
+            return cleaned
+        if not self._contains_devanagari(cleaned):
+            return cleaned
+
+        system_prompt = (
+            "Translate the provided financial text to professional English only. "
+            "Preserve all numbers, percentages, currency values, and financial acronyms exactly. "
+            "Do not add or remove facts. Return only the translated text."
+        )
+        try:
+            translated = self._call_groq(system_prompt, cleaned, model_override=self.fast_model).strip()
+            return self._clean_text_block(translated or cleaned, max_chars=max_chars)
+        except Exception:
+            return cleaned
+
+    def _normalize_insight_list(self, value: Any) -> List[str]:
+        items: List[str] = []
+        if isinstance(value, list):
+            for entry in value:
+                line = self._clean_text_block(entry, max_chars=180)
+                if line:
+                    items.append(line)
+        elif isinstance(value, str):
+            for part in re.split(r"\n+|\s*[-*•]\s*", value):
+                line = self._clean_text_block(part, max_chars=180)
+                if line:
+                    items.append(line)
+
+        dedup: List[str] = []
+        for line in items:
+            if line not in dedup:
+                dedup.append(line)
+            if len(dedup) >= 4:
+                break
+
+        if len(dedup) < 3:
+            while len(dedup) < 3:
+                dedup.append("Insufficient structured insight extracted; review transcript-specific financial commitments.")
+
+        return dedup[:4]
+
+    def _sanitize_analysis_json(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(data)
+        out["executive_summary"] = self._ensure_english_text(str(out.get("executive_summary", "")), max_chars=900)
+        out["risk_assessment"] = self._ensure_english_text(str(out.get("risk_assessment", "")), max_chars=700)
+        out["future_gearing"] = self._ensure_english_text(str(out.get("future_gearing", "")), max_chars=500)
+        out["strategic_intent"] = self._clean_text_block(out.get("strategic_intent"), max_chars=80)
+        out["key_insights"] = [self._ensure_english_text(line, max_chars=180) for line in self._normalize_insight_list(out.get("key_insights"))]
+
+        risk = str(out.get("risk_level", "LOW")).strip().upper()
+        if risk not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+            risk = "LOW"
+        out["risk_level"] = risk
+        return out
 
     def analyze(
         self,
@@ -465,8 +574,8 @@ OUTPUT: corrected transcript text only."""
         transcript = transcript[:2500]
         entities = (entities or [])[:20]
         ent_text = json.dumps(entities, indent=2)
-        thread_history_context = (thread_history_context or "").strip()
-        long_term_memory_context = (long_term_memory_context or "").strip()
+        thread_history_context = (thread_history_context or "").strip()[:1400]
+        long_term_memory_context = (long_term_memory_context or "").strip()[:900]
 
         reason_sections = [
             f"CURRENT TRANSCRIPT (PRIMARY - 70% weight):\n{transcript}",
@@ -532,6 +641,9 @@ Return ONLY valid JSON matching this exact schema:
   "risk_level": "LOW or MEDIUM or HIGH or CRITICAL"
 }
 
+LANGUAGE RULE:
+- Keep transcript interpretation faithful to source language, but all narrative output fields in this JSON MUST be English.
+
 NEVER WRITE: 'the customer discussed', 'this conversation covers', 'it is important to note'."""
 
         final_sections = [f"CURRENT TRANSCRIPT:\n{transcript}"]
@@ -547,7 +659,7 @@ NEVER WRITE: 'the customer discussed', 'this conversation covers', 'it is import
         analysis_json = self._safe_json_parse(raw_response)
         
         # Merge technical reasoning into the response
-        analysis_json["expert_reasoning_points"] = expert_reasoning
+        analysis_json["expert_reasoning_points"] = self._clean_text_block(expert_reasoning, max_chars=2200)
         return analysis_json
 
     def generate_future_insights(

@@ -1,5 +1,8 @@
 # Python
 __pycache__/
+
+# Local validation artifacts
+full_validation_output.txt
 *.py[cod]
 *$py.class
 *.so

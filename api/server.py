@@ -678,7 +678,8 @@ def _build_analysis_result(
         "risk_assessment": analysis.get("risk_assessment", ""),
         "key_insights": masked_key_insights,
         "key_points": masked_key_insights,
-        "transcript": clean_text,
+        "transcript": asr_text,
+        "normalized_transcript": clean_text,
         "expert_reasoning_points": analysis.get("expert_reasoning_points", ""),
         "expert_reasoning": analysis.get("expert_reasoning_points", ""),
         "model_attribution": {
@@ -880,7 +881,9 @@ async def analyze_audio(
             local_text = EXPERT.transcribe_local(temp_wav)
             asr = {"text": local_text, "language": "hindi" if local_text else "unknown", "asr_confidence": 0.85}
             
-        raw_text = asr.get("text", "")
+        raw_text = str(asr.get("text", "")).strip()
+        if not raw_text:
+            raise HTTPException(status_code=422, detail="Could not transcribe audio. Please retry with clearer audio.")
         t_asr = time.time() - t_start
 
         # ── Stage 2: Normalization (Llama 8B) ──
@@ -896,70 +899,25 @@ async def analyze_audio(
         t_norm = time.time() - t2_start
 
         thread_value = thread_id.strip() or f"thr_{uuid.uuid4().hex[:8]}"
-        try:
-            route_info = EXPERT.route_intent(clean_text)
-            route = route_info.get("route", "financial_inquiry")
-            route_label = route_info.get("label", "financial information request")
-            route_score = float(route_info.get("score", 0.0))
-        except Exception as exc:
-            print(f"[Server] Audio route classification failed: {exc}")
-            route = "analysis"
-            route_label = "personal financial situation discussion"
-            route_score = 0.0
-
-        if route == "analysis":
-            result = _build_analysis_result(
-                clean_text=clean_text,
-                user_id=current_user,
-                asr_text=raw_text,
-                t_asr=t_asr,
-                t_norm=t_norm,
-                t_start=t_start,
-                thread_id=thread_value,
-                input_mode="audio",
-                asr_meta=asr,
-            )
-            result["language"] = pre_nlp.get("detected_language", result.get("language", "unknown"))
-            result["language_confidence"] = pre_nlp.get("language_confidence", result.get("language_confidence", 0.0))
-            result["language_breakdown"] = language_breakdown if isinstance(language_breakdown, dict) else {"hindi": 0.0, "english": 0.0, "hinglish": 0.0}
-            result["script_preserved"] = True
-            result.setdefault("model_attribution", {})
-            result["model_attribution"]["script_preserved"] = True
-            result["model_attribution"]["language_breakdown"] = result["language_breakdown"]
-        elif route == "general":
-            assistant_text = EXPERT.answer_casual(clean_text)
-            result = _build_direct_response_result(
-                user_id=current_user,
-                thread_id=thread_value,
-                input_text=clean_text,
-                assistant_text=assistant_text,
-                route=route,
-                route_label=route_label,
-                route_score=route_score,
-            )
-            result["input_mode"] = "audio"
-            result["raw_asr_text"] = raw_text
-            result["timing"]["asr_s"] = round(t_asr, 2)
-            result["timing"]["normalization_s"] = round(t_norm, 2)
-            result["language_breakdown"] = language_breakdown if isinstance(language_breakdown, dict) else {"hindi": 0.0, "english": 0.0, "hinglish": 0.0}
-            result["script_preserved"] = True
-        else:
-            assistant_text = EXPERT.answer_financial_inquiry(clean_text)
-            result = _build_direct_response_result(
-                user_id=current_user,
-                thread_id=thread_value,
-                input_text=clean_text,
-                assistant_text=assistant_text,
-                route=route,
-                route_label=route_label,
-                route_score=route_score,
-            )
-            result["input_mode"] = "audio"
-            result["raw_asr_text"] = raw_text
-            result["timing"]["asr_s"] = round(t_asr, 2)
-            result["timing"]["normalization_s"] = round(t_norm, 2)
-            result["language_breakdown"] = language_breakdown if isinstance(language_breakdown, dict) else {"hindi": 0.0, "english": 0.0, "hinglish": 0.0}
-            result["script_preserved"] = True
+        # Audio endpoint must always return analysis payload so frontend details remain available.
+        result = _build_analysis_result(
+            clean_text=clean_text,
+            user_id=current_user,
+            asr_text=raw_text,
+            t_asr=t_asr,
+            t_norm=t_norm,
+            t_start=t_start,
+            thread_id=thread_value,
+            input_mode="audio",
+            asr_meta=asr,
+        )
+        result["language"] = pre_nlp.get("detected_language", result.get("language", "unknown"))
+        result["language_confidence"] = pre_nlp.get("language_confidence", result.get("language_confidence", 0.0))
+        result["language_breakdown"] = language_breakdown if isinstance(language_breakdown, dict) else {"hindi": 0.0, "english": 0.0, "hinglish": 0.0}
+        result["script_preserved"] = True
+        result.setdefault("model_attribution", {})
+        result["model_attribution"]["script_preserved"] = True
+        result["model_attribution"]["language_breakdown"] = result["language_breakdown"]
 
         # Save to Secure DB
         save_conversation(result)
@@ -974,6 +932,8 @@ async def analyze_audio(
                 print(f"[Server] Quality metrics save skipped: {exc}")
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[Server] Pipeline crash: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -231,12 +231,6 @@ def main():
         print(f"  - JSONB Field: metadata_jsonb (contains all quality metrics)")
         print(f"\nTo verify JSONB content, run:")
         print(f"  SELECT metadata_jsonb FROM ai_conversation_quality_metrics LIMIT 5;\n")
-        print(f"             quality_tier, asr_confidence, ner_coverage_pct, rouge1_recall,")
-        print(f"             entity_alignment_pct, language_confidence,")
-        print(f"             financial_relevance_score, metadata_jsonb, created_at")
-        print(f"  - JSONB Field: metadata_jsonb (contains all quality metrics)")
-        print(f"\nTo verify JSONB content, run:")
-        print(f"  SELECT metadata_jsonb FROM ai_conversation_quality_metrics LIMIT 5;\n")
         
     except Exception as e:
         print_fail(f"Migration failed: {e}")
