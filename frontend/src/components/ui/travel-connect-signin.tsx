@@ -233,7 +233,7 @@ export default function TravelConnectSignin({
             <div className="travel-connect-logo">
               <h2 style={{ fontSize: '3rem', letterSpacing: '-0.02em', background: 'linear-gradient(180deg, #fff 0%, #00ff9c 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
                 <DecryptedText
-                  text="finflux"
+                  text="FinFlux"
                   speed={45}
                   maxIterations={12}
                   characters="01!@#%"

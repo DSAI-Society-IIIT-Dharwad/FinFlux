@@ -91,7 +91,7 @@ export default function LandingPage({ onGetStarted }: LandingPageProps) {
         >
           {phase >= 2 ? (
             <DecryptedText
-              text="finflux"
+              text="FinFlux"
               speed={45}
               maxIterations={12}
               characters="01!@#%"
